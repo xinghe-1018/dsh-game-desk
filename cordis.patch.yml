@@ -1,0 +1,10 @@
+# dsh-game-desk：案卷台 —— 左侧入口栏两行（剧本杀 / 游戏厅）+ 本子库。
+#
+# casesDir 是本子放哪：默认 $DSH_HOME/game-desk/cases，每个本子一个子目录、里面一份 case.yml。
+# 首次加载会把 @max-null/dsh-jubensha 自带的 7 个本子拷进来（只拷缺的，不覆盖手改过的）。
+- insert:
+    - id: game-desk
+      name: dsh-game-desk
+      config:
+        casesDir: ""
+        seedFromJubensha: true

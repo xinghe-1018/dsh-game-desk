@@ -1,0 +1,42 @@
+{
+  "name": "dsh-game-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "案卷台：把剧本杀（@max-null/dsh-jubensha）与 dsh-xgame 一起放进左侧入口栏，带一个放本子的文件夹与选本/开局界面。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./web/*": "./web/*"
+  },
+  "files": [
+    "lib",
+    "web",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    },
+    "engines": {
+      "dsh": "^0.2.0-0"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "jubensha",
+    "trpg",
+    "game"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

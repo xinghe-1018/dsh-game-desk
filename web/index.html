@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>案卷台</title>
+<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="library.css" />
+<link rel="stylesheet" href="table.css" />
+  <link rel="stylesheet" href="arcade.css" />
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-name">案卷台</span>
+    <span class="brand-sub">CASE&nbsp;DESK</span>
+    <span class="room-switch" id="room-switch" role="tablist" aria-label="换房间">
+      <button type="button" class="room-tab is-on" id="room-jubensha" data-room="jubensha">剧本杀</button>
+      <button type="button" class="room-tab" id="room-arcade" data-room="arcade">游戏厅</button>
+    </span>
+  </div>
+  <div class="topbar-tools">
+    <button class="ghost" id="btn-import-case" type="button">导入剧本</button>
+    <button class="ghost" id="btn-import-arcade" type="button" hidden title="把资料夹登记成游戏厅的「材料局」">导入内容</button>
+    <button class="ghost" id="btn-lan" type="button" title="同一局域网的手机 / 平板也能开案卷台">局域网</button>
+    <button class="ghost" id="btn-dir" type="button">打开文件夹</button>
+    <button class="ghost" id="btn-new" type="button">新建本子</button>
+  </div>
+</header>
+
+<main class="stage" id="stage-jubensha">
+  <section class="ledger">
+    <div class="lib">
+      <span class="lib-k">书库</span>
+      <select id="lib" aria-label="切换书库"></select>
+      <button class="ghost sm" id="btn-addroot" type="button" title="把任意资料夹加进书库">＋ 目录</button>
+      <button class="ghost sm" id="btn-refresh" type="button" title="重新扫描">刷新</button>
+    </div>
+    <div class="ledger-head">
+      <label class="search">
+        <span class="search-ico" aria-hidden="true"></span>
+        <input id="q" type="search" placeholder="按本名、类型、文件名筛" autocomplete="off" />
+      </label>
+      <div class="chips" id="chips">
+        <button class="chip is-on" data-filter="all" type="button">全部</button>
+        <button class="chip" data-filter="4" type="button">四人</button>
+        <button class="chip" data-filter="6" type="button">六人</button>
+      </div>
+    </div>
+    <div class="cases" id="cases"><div class="skeleton"></div></div>
+    <div class="ledger-foot"><span id="count">—</span><span id="dirpath" class="path"></span></div>
+  </section>
+
+  <section class="dossier" id="dossier">
+    <article class="empty" id="empty">
+      <p class="empty-k">这个书库还是空的</p>
+      <p class="empty-l">
+        书库根目录下，一个本子一个子目录：<br />
+        · 目录里有 <code>case.yml</code> → 按结构化本子读；<br />
+        · 没有 <code>case.yml</code> → 按资料夹读（PDF / 图片 / 文档都行）。<br />
+        也可以点上面「＋ 目录」，把别处的本子合辑指过来。
+      </p>
+      <button class="primary" id="empty-new" type="button">新建第一本</button>
+    </article>
+  </section>
+</main>
+
+<main class="stage" id="stage-arcade" hidden>
+  <section class="modes" id="modes"></section>
+  <aside class="howto">
+    <p class="howto-k">怎么开</p>
+    <ol>
+      <li>选一种玩法。</li>
+      <li>点一张玩法卡：这一页直接弹出对局室，引擎就在这一页里应答，不用回会话。</li>
+      <li>下面换动作、填内容、回车提交；想推倒重来点右上「重新开一局」。</li>
+    </ol>
+    <p class="howto-note">这七种玩法来自 <code>dsh-xgame</code>：真相封在插件侧，NPC 台词要过泄密审计。</p>
+  </aside>
+</main>
+
+<div class="viewer" id="viewer" hidden>
+  <div class="viewer-bar">
+    <span class="viewer-name" id="viewer-name"></span>
+    <a class="ghost sm" id="viewer-raw" href="#" target="_blank" rel="noreferrer">新窗口打开</a>
+    <button class="ghost sm" id="viewer-close" type="button">关闭</button>
+  </div>
+  <div class="viewer-body" id="viewer-body"></div>
+</div>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <h2 id="sheet-title">新建一本</h2>
+    <p class="sheet-l">先给骨架取个名字。真正的本子内容，建完在文件夹里改 <code>case.yml</code>。</p>
+    <label class="field"><span>本名</span><input id="f-title" type="text" placeholder="例如：雨夜书店" /></label>
+    <div class="field-row">
+      <label class="field"><span>人数</span>
+        <select id="f-players"><option>4</option><option>5</option><option>6</option></select>
+      </label>
+      <label class="field"><span>类型</span>
+        <select id="f-genre"><option value="deduction">推理</option><option value="emotion">情感</option><option value="horror">恐怖</option></select>
+      </label>
+    </div>
+    <div class="sheet-actions">
+      <button class="ghost" id="sheet-cancel" type="button">算了</button>
+      <button class="primary" id="sheet-ok" type="button">建这本</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="lan-sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="lan-title">
+    <h2 id="lan-title">局域网</h2>
+    <p class="sheet-l">开了以后，同一 Wi-Fi / 局域网里的手机、平板、别的电脑，用下面的链接就能直接开案卷台和对局室。钥匙就写在链接里，别贴到公网；用完想关就把开关拨回「关」。</p>
+    <div class="field-row">
+      <label class="field"><span>局域网访问</span>
+        <select id="l-enable"><option value="off">关</option><option value="on">开</option></select>
+      </label>
+      <label class="field"><span>端口</span><input id="l-port" type="text" placeholder="5288" /></label>
+    </div>
+    <label class="field"><span>钥匙</span><div class="lan-key" id="l-key">——</div></label>
+    <div class="lan-urls" id="l-urls"></div>
+    <div class="t-block">
+      <div class="field-row">
+        <label class="field"><span>公网房间（局域网外）</span>
+          <select id="t-enable"><option value="off">关</option><option value="on">开</option></select>
+        </label>
+        <button class="ghost" id="t-rotatekey" type="button">换公网钥匙</button>
+      </div>
+      <div class="lan-urls" id="t-urls"></div>
+      <div class="field-row t-quota">
+        <label class="field"><span>公网模型额度</span>
+          <select id="r-mode"><option value="off">不烧额度（默认）</option><option value="quota">每日限额</option><option value="allow">完全放开</option></select>
+        </label>
+        <label class="field"><span>每日次数</span><input id="r-daily" type="text" placeholder="40" /></label>
+      </div>
+      <p class="r-used" id="r-used">——</p>
+      <p class="t-warn" id="t-warn"></p>
+    </div>
+    <div class="sheet-actions">
+      <button class="ghost" id="l-rotate" type="button">换钥匙</button>
+      <button class="ghost" id="l-saveport" type="button">存端口</button>
+      <button class="primary" id="lan-close" type="button">好了</button>
+    </div>
+  </div>
+</div>
+
+<div class="match" id="match" hidden>
+  <div class="match-page" role="region" aria-labelledby="match-title">
+    <div class="match-head">
+      <span class="match-k">开场</span>
+      <h2 class="match-title" id="match-title">正在开局</h2>
+      <button class="ghost sm" id="match-close" type="button">返回案卷</button>
+    </div>
+    <p class="match-sub" id="match-sub"></p>
+    <div class="match-grid">
+      <section class="match-main">
+        <div class="bar"><i id="match-bar"></i></div>
+        <ol class="steps" id="match-steps"></ol>
+        <p class="match-note" id="match-note"></p>
+        <div class="match-actions" id="match-actions"></div>
+        <div class="match-next">
+          <div class="side-k">接下来</div>
+          <ol>
+            <li>会话先校一遍本子，格式问题会当场报出来。</li>
+            <li>再开局：座位、真人座、AI 座按本子坐好。</li>
+            <li>之后在对话里推进；这一页随时可以「返回案卷」。</li>
+          </ol>
+        </div>
+      </section>
+      <aside class="match-side">
+        <div class="side-k">发给会话的指令</div>
+        <pre class="match-text" id="match-text"></pre>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="import-sheet" hidden>
+  <div class="sheet-card wide" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <h2 id="import-title">导入剧本</h2>
+    <p class="sheet-l">填一个资料夹路径：有 <code>case.yml</code> 就按本子读；只有 PDF / 图片 / 文档就按资料夹读。先体检，再决定导不导。</p>
+    <label class="field"><span>路径</span><input id="i-path" type="text" list="i-paths" placeholder="D:\BaiduNetdiskDownload\双人本合集\1-4人本-桐花中路私立协济医院怪谈" /></label>
+    <datalist id="i-paths"></datalist>
+    <div class="ocr-row">
+      <label class="ocr-toggle">
+        <input type="checkbox" id="i-parallel" />
+        <span>OCR 并行</span>
+      </label>
+      <span class="ocr-note" id="i-ocr-note">默认串行：一次只读一份扫描件，稳、不抢显存。勾上才同时跑两路。</span>
+    </div>
+    <div class="sheet-actions">
+      <button class="ghost" id="import-cancel" type="button">算了</button>
+      <button class="primary" id="import-scan" type="button">扫描并体检</button>
+    </div>
+    <div class="import-result" id="import-result" hidden></div>
+  </div>
+</div>
+
+<div class="sheet" id="arcade-sheet" hidden>
+  <div class="sheet-card wide" role="dialog" aria-modal="true" aria-labelledby="arcade-title">
+    <h2 id="arcade-title">导入内容到游戏厅</h2>
+    <p class="sheet-l">填一个资料夹（案例集、小说、设定集都行）：先抽字，再挑一种玩法登记进内容库；之后点它的卡片就开一局「材料局」，主持人按资料现编现裁。</p>
+    <label class="field"><span>路径</span><input id="a-path" type="text" list="a-paths" placeholder="D:\资料\某本怪谈合集" /></label>
+    <datalist id="a-paths"></datalist>
+    <div class="field-row">
+      <label class="field"><span>玩法</span>
+        <select id="a-scheme">
+          <option value="soup">海龟汤</option>
+          <option value="detective">侦探推理</option>
+          <option value="escape" selected>密室逃脱</option>
+          <option value="party">剧本杀</option>
+          <option value="loop">时间循环</option>
+          <option value="council">王国议会</option>
+          <option value="trpg">单人跑团</option>
+        </select>
+      </label>
+      <label class="field"><span>名字（可空，默认用文件夹名）</span><input id="a-title" type="text" /></label>
+      <label class="field"><span>人数（可空，按名字猜）</span><input id="a-players" type="text" placeholder="2 / 4-6 / 1人" /></label>
+    </div>
+    <div class="sheet-actions">
+      <button class="ghost" id="arcade-cancel" type="button">算了</button>
+      <button class="primary" id="arcade-scan" type="button">扫描并抽字</button>
+    </div>
+    <div class="import-result" id="arcade-result" hidden></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<section id="table" class="tbl" hidden aria-label="对局室"></section>
+
+<script src="table.js"></script>
+  <script src="arcade.js"></script>
+<script src="room.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
