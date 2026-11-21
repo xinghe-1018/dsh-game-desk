@@ -1,5 +1,23 @@
 /* 案卷台页面逻辑：一个书库可以指向任意资料夹；本子有 case.yml 按结构化读，没有就按资料夹读。
    开局把指令交回客户端半填进对话输入框。 */
+// 纯工具函数在 ./lib/util.js（本文件拆分出去的，渲染结果逐字不变）
+import {
+  esc, bytes, baseName, errCn, errHtml,
+  GENRE, DIFF, genreOf, diffOf, rawTick,
+  playersLabel, playersText, playersRange,
+  caseNo, fmtAt, genreCn
+} from './lib/util.js'
+
+import {
+  metaLine, scanBadge, packTags, orderPacks,
+  aiFillItems, packMissHtml, reviewResultHtml, packReviewHtml,
+  packAiFillHtml, fact
+} from './lib/packview.js'
+
+import { createRoombar } from './lib/roombar.js'
+import { createListview } from './lib/listview.js'
+import { createPackDossier } from './lib/packdossier.js'
+
 (function () {
   'use strict'
 
@@ -11,21 +29,9 @@
   var state = { cases: [], roots: [], root: '', active: null, filter: 'all', q: '' }
 
   function $(id) { return document.getElementById(id) }
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    })
-  }
-  function bytes(n) {
-    if (!n) return '—'
-    if (n < 1024) return n + ' B'
-    if (n < 1048576) return (n / 1024).toFixed(0) + ' KB'
-    return (n / 1048576).toFixed(1) + ' MB'
-  }
-  function baseName(p) {
-    var parts = String(p || '').split(/[\\/]/).filter(Boolean)
-    return parts.length ? parts[parts.length - 1] : String(p || '')
-  }
+  // 接口前缀只留在这一处：模块拿到的 api(path, opts) 自己不能拼 API
+  function api(path, opts) { return fetch(API + path, opts) }
+
 
   // ---------- 主题：跟随宿主 ----------
   function applyTheme(name) {
@@ -58,6 +64,21 @@
     el.hidden = false
     clearTimeout(toastTimer)
     toastTimer = setTimeout(function () { el.hidden = true }, ms || 2600)
+  }
+
+  // 导入完成提示：导入是本地抽取（pdf/OCR 不走模型），本次模型用量恒为 0；
+  // 另取案卷台今日合计（/api/usage），把真实花过的 token 一并报出来。
+  function importDoneToast(folder, updated, job) {
+    var used = (job && typeof job.modelUsage === 'number') ? job.modelUsage : 0
+    var base = (updated ? '已刷新：' : '已导入：') + folder + ' · 本次模型用量 ' + used + ' token'
+    if (!used) base += '（导入是本地抽取，不走模型）'
+    fetch(API + '/usage', { cache: 'no-store' })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        var t = j && j.ok && j.today ? Number(j.today.total) : null
+        toast(base + (t === null ? '' : ' · 案卷台今日 ' + t + ' token（' + j.today.calls + ' 次模型调用）'), 5600)
+      })
+      .catch(function () { toast(base, 5200) })
   }
 
   function copyText(text, okMsg) {
@@ -182,46 +203,7 @@
     return '用 dsh-xgame 开一局「' + m.name + '」：scheme=' + m.id + '，难度 1。直接调 game_start，然后按开局简报以主持人身份开场。'
   }
 
-  // ---------- 本子清单 ----------
-  var GENRE = { deduction: '推理', drama: '戏剧', emotion: '情感', horror: '恐怖', comedy: '喜剧', suspense: '悬疑', mystery: '本格', imported: '未标注', unknown: '未标注', 未标注: '未标注' }
-  var DIFF = { beginner: '新手', easy: '轻松', normal: '标准', standard: '进阶', hard: '硬核', expert: '老手' }
-  function genreOf(c) { return GENRE[c.genre] || c.genre || '' }
-  function diffOf(c) { return DIFF[c.difficulty] || c.difficulty || '' }
 
-  function metaLine(c) {
-    var bits = []
-    if (c.players) bits.push(c.players + ' 人')
-    if (c.kind === 'pack') {
-      if (c.counts.pdf) bits.push('PDF ' + c.counts.pdf)
-      if (c.counts.image) bits.push('图 ' + c.counts.image)
-      if (!c.counts.pdf && !c.counts.image) bits.push(c.counts.all + ' 个文件')
-    } else {
-      if (c.genre) bits.push(genreOf(c))
-      if (c.difficulty) bits.push(diffOf(c))
-    }
-    return bits.join(' · ') || (c.kind === 'pack' ? '资料夹' : '本子')
-  }
-
-  function haystack(c) {
-    var bits = [c.title, c.id, c.folder, c.genre, (c.tags || []).join(' ')]
-    if (c.kind === 'pack') bits.push((c.files || []).map(function (f) { return f.name }).join(' '))
-    return bits.join(' ').toLowerCase()
-  }
-
-  function visible() {
-    var q = state.q.trim().toLowerCase()
-    return state.cases.filter(function (c) {
-      if (state.filter === '4' && String(c.players) !== '4') return false
-      if (state.filter === '6' && String(c.players) !== '6') return false
-      if (!q) return true
-      return haystack(c).indexOf(q) >= 0
-    })
-  }
-
-  function caseNo(c) {
-    var m = /^(\d+)/.exec(String(c.folder || ''))
-    return (m && m[1]) || String(c.id || '·')
-  }
 
   // 这一本有没有未完的对局：和 table.js 用同一个存档键，有对白/有幕次/有笔记就算开着
   function tableSave(c) {
@@ -236,32 +218,30 @@
     } catch (e) { return null }
   }
 
-  function renderList() {
-    var list = visible()
-    var box = $('cases')
-    if (list.length === 0) {
-      box.innerHTML = '<div class="empty" style="margin:26px 8px;text-align:left"><p class="empty-k" style="font-size:16px">这里没有本子</p>' +
-        '<p class="empty-l">换一个筛选，或点「＋ 目录」把别处的本子合辑加进来。</p></div>'
-    } else {
-      box.innerHTML = list.map(function (c) {
-        return '<button class="case' + (state.active && state.active.folder === c.folder ? ' is-on' : '') + '" data-folder="' + esc(c.folder) + '" type="button">' +
-          '<span class="case-no">' + esc(caseNo(c)) + '</span>' +
-          '<span class="case-body"><span class="case-title">' + esc(c.title) + '</span>' +
-          '<span class="case-meta">' + ((c.warnings && c.warnings.length) ? '<span class="case-warn"></span>' : '') +
-          '<span class="badge ' + (c.kind === 'pack' ? 'badge-pack' : (c.imported ? 'badge-import' : 'badge-case')) + '">' + (c.kind === 'pack' ? '资料夹' : (c.imported ? '导入本' : '本子')) + '</span>' +
-          esc(metaLine(c)) + (tableSave(c) ? ' · 对局中' : '') + '</span></span>' +
-          '</button>'
-      }).join('')
-    }
-    $('count').textContent = list.length + ' / ' + state.cases.length + ' 项'
-    $('dirpath').textContent = state.dir
-    $('dirpath').title = state.dir
-    Array.prototype.forEach.call(box.querySelectorAll('.case'), function (el) {
-      el.addEventListener('click', function () { select(el.getAttribute('data-folder')) })
+  var LAST_REVIEW = {} // root|folder → 刚拿到的复核回包（宿主 meta 还没刷新时也照样画得出结果与按钮）
+
+  // ---------- 复核 / 补全 / 撤销 三个动作 ----------
+  function postJson(path, body) {
+    return fetch(API + path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      return r.json().catch(function () { return null }).then(function (j) { return { status: r.status, body: j } })
     })
   }
-
-  function fact(k, v) { return '<div class="fact"><span>' + esc(k) + '</span><strong>' + esc(v || '—') + '</strong></div>' }
+  function setBtnBusy(btn, busy, text) {
+    if (!btn) return
+    if (busy) {
+      if (btn.__gdOld == null) btn.__gdOld = btn.textContent
+      btn.disabled = true
+      btn.textContent = text
+      return
+    }
+    btn.disabled = false
+    if (btn.__gdOld != null) { btn.textContent = btn.__gdOld; btn.__gdOld = null }
+  }
+  var listDebounce = 0
 
   // 对局室里选过谁，档案页的座位 chips 跟着走（localStorage 与 table.js 同一个键）
   function tableMe(c) {
@@ -273,445 +253,148 @@
     return -1
   }
 
-  // 在档案页直接点座位换人（对局室打开时读的是同一份存档）
-  function pickSeat(c, idx) {
-    var k = 'gd:table:' + state.root + '|' + c.folder
-    var st = { act: 1, dealt: [], note: '', t0: Date.now(), seat: idx, tab: 'roles', me: idx }
-    try { var raw = localStorage.getItem(k); if (raw) st = JSON.parse(raw) } catch (e) { /* 坏档就重开 */ }
-    st.me = idx
-    st.seat = idx
-    try { localStorage.setItem(k, JSON.stringify(st)) } catch (e) { /* 存不下不致命 */ }
-    renderCase(c)
-    toast('你现在演：' + (((c.roles || [])[idx] || {}).name || ('座位 ' + idx)))
+  // ---------- 昵称：座位、在场名册、DM 台词都用这个名字 ----------
+  function nick() {
+    try {
+      var v = localStorage.getItem('gd-nick')
+      if (v) return v
+      v = '玩家' + Math.random().toString(36).slice(2, 6)
+      localStorage.setItem('gd-nick', v)
+      return v
+    } catch (e) { return '玩家' + Math.random().toString(36).slice(2, 6) }
+  }
+  function setNick(v) {
+    var s = String(v == null ? '' : v).trim().slice(0, 12)
+    if (!s) return ''
+    try { localStorage.setItem('gd-nick', s) } catch (e) { /* 存不下就只在这一次生效 */ }
+    return s
   }
 
-  function renderCase(c) {
-    var mineIdx = tableMe(c)
-    var seats = (c.roles || []).map(function (r, i) {
-      var mine = mineIdx >= 0 ? i === mineIdx : r.player === 'human'
-      return '<button class="seat' + (mine ? ' is-human' : '') + '" data-me="' + i + '" type="button" title="' +
-        (mine ? '你现在演这个' : '选他当你演的角色') + '"><b>' + esc(r.name || r.id) + '</b><em>' +
-        (mine ? '你' : 'AI') + '</em></button>'
-    }).join('')
-    var warns = (c.warnings && c.warnings.length)
-      ? '<div class="warn">格式提醒：' + esc(c.warnings.join('；')) + '。开局时 <code>jubensha_case</code> 会再报一次，改本子时一并补。</div>'
-      : ''
-    var seen = {}
-    var tags = [genreOf(c), diffOf(c)].concat(c.tags || []).filter(function (t) {
-      if (!t || seen[t]) return false
-      seen[t] = 1
-      return true
-    }).map(function (t) { return '<span class="tag">' + esc(t) + '</span>' }).join('')
-    var imported = c.imported === true
-    var srcFiles = (c.files || []).filter(function (f) { return f.rel.indexOf('_source/') === 0 })
-    var textFiles = (c.files || []).filter(function (f) { return f.rel.indexOf('_text/') === 0 })
-    var importBlock = imported
-      ? '<div class="srcbar"><span class="tag tag-import">导入</span>' +
-          '<span class="src-line">原始资料：' + esc(c.sourceFolder || '（未记录来源）') + '</span>' +
-          (c.verdict && VERDICT[c.verdict]
-            ? '<span class="vchip is-' + esc(c.verdict) + '">体检 ' + esc(VERDICT[c.verdict].label) + '</span>'
-            : '') +
-          '<button class="ghost sm" id="btn-gaps" type="button" title="让模型读一遍这本，只列缺什么，不替它编">看看缺什么</button>' +
-        '</div>'
-      : ''
-    var gapRows = (imported && Array.isArray(c.gaps) && c.gaps.length)
-      ? '<div class="gaplist"><div class="gaplist-k">体检缺项 · ' + c.gaps.length + ' 项 —— 不是拆不出来，是原文里就没这些</div>' +
-          c.gaps.map(function (k) {
-            return '<div class="gap is-' + (k.level === 'fail' ? 'fail' : 'warn') + '"><b>' + esc(k.label || k.id || '') + '</b>' +
-              '<span>' + esc(k.detail || '') + '</span></div>'
-          }).join('') +
-          '<p class="gapfix">补法：把缺的文件补进原资料夹；人物剧本也可以让 AI 按已有正文补写。补齐后回案卷台重新导入同一资料夹，这一栏随体检刷新。</p>' +
-        '</div>'
-      : ''
-    var sourceSections = ''
-    if (imported && srcFiles.length) {
-      sourceSections += '<div class="files"><div class="files-k">原始资料 <em>' + srcFiles.length + '</em></div>' +
-        srcFiles.map(function (x) {
-          return '<button class="file" data-rel="' + esc(x.rel) + '" data-kind="' + esc(x.kind) + '" type="button">' +
-            '<span class="file-kind">' + esc(x.ext.replace('.', '') || 'file') + '</span>' +
-            '<span class="file-name">' + esc(x.rel.replace('_source/', '')) + '</span>' +
-            '<span class="file-size">' + esc(bytes(x.bytes)) + '</span></button>'
-        }).join('') + '</div>'
-    }
-    if (imported && textFiles.length) {
-      sourceSections += '<div class="files"><div class="files-k">抽出的文字 <em>' + textFiles.length + '</em></div>' +
-        textFiles.map(function (x) {
-          return '<button class="file" data-rel="' + esc(x.rel) + '" data-kind="text" type="button">' +
-            '<span class="file-kind">txt</span>' +
-            '<span class="file-name">' + esc(x.rel.replace('_text/', '')) + '</span>' +
-            '<span class="file-size">' + esc(bytes(x.bytes)) + '</span></button>'
-        }).join('') + '</div>'
-    }
-    $('dossier').innerHTML =
-      '<div class="dossier-inner">' +
-        '<button class="backlink" type="button">← 返回列表</button>' +
-        '<div class="eyebrow">case ' + esc(caseNo(c)) + (c.victim ? ' · 死者 ' + esc(c.victim) : '') + (imported ? ' · 导入本' : '') + '</div>' +
-        '<h1 class="title">' + esc(c.title) + '</h1>' +
-        '<div class="tags">' + tags + '</div>' +
-        importBlock + gapRows + '<div class="gaps-out" id="gaps-out" hidden></div>' +
-        '<div class="facts">' + fact('人数', (c.players || (c.roles || []).length) + ' 人') + fact('座位', (c.roles || []).length + ' 席') +
-          fact('类型', genreOf(c)) + fact('难度', diffOf(c)) + '</div>' +
-        warns +
-        (c.brief && c.brief.indexOf('（原文没有') !== 0 ? '<div class="brief"><div class="brief-k">引子</div>' + esc(c.brief) + '</div>' : '') +
-        (seats ? '<div class="seats"><div class="seats-k">座位</div><div class="seat-row">' + seats + '</div></div>' : '') +
-        sourceSections +
-        '<div class="actions">' +
-          '<button class="primary" id="btn-open" type="button">开这一局</button>' +
-          '<button class="ghost" id="btn-case-file" type="button">复制本子路径</button>' +
-          '<button class="ghost" id="btn-open-dir" type="button">打开文件夹</button>' +
-        '</div>' +
-        '<p class="hint">「开这一局」在这张案卷上铺开对局室：座位、正文、线索、笔记都在这一页，不跳去会话。对局室里的「交给 AI 主持」也是在本页开局 —— DM 直接带这一局。</p>' +
-      '</div>'
-    var ts = tableSave(c)
-    if (ts) {
-      $('btn-open').textContent = '继续这一局'
-      var hp1 = $('dossier').querySelector('.hint')
-      if (hp1) hp1.textContent = hp1.textContent + '（这一页存着未完的对局：第 ' + ts.act + ' 幕 · ' + ts.turns + ' 句对白 · ' + (ts.running ? '计时在走' : '已停表') + '）'
-    }
-    $('btn-open').addEventListener('click', function () { openTable(c) })
-    Array.prototype.forEach.call($('dossier').querySelectorAll('.seat[data-me]'), function (el) {
-      el.addEventListener('click', function () { pickSeat(c, Number(el.getAttribute('data-me'))) })
-    })
-    $('btn-case-file').addEventListener('click', function () { copyText(c.file || c.dir, '本子路径已复制') })
-    $('btn-open-dir').addEventListener('click', function () { reveal(c.dir) })
-    var gb = $('btn-gaps')
-    if (gb) gb.addEventListener('click', function () { gapsReport(state.root, c.folder, gb, $('gaps-out')) })
-    Array.prototype.forEach.call($('dossier').querySelectorAll('.file'), function (el) {
-      el.addEventListener('click', function () { preview(c, el.getAttribute('data-rel'), el.getAttribute('data-kind')) })
-    })
-    Array.prototype.forEach.call($('dossier').querySelectorAll('.thumb'), function (el) {
-      el.addEventListener('click', function () { preview(c, el.getAttribute('data-rel'), 'image') })
-    })
+  // ---------- 座位认领：同一本书的席位存在服务端，谁的浏览器都不独占 ----------
+  var SEAT_MAP = {}   // key = root|folder → 服务端回的 seats 列表
+  function seatWho() {
+    try {
+      var w = localStorage.getItem('gd-who')
+      if (w) return w
+    } catch (e) { /* 私密模式读不到 localStorage，就退回启动时生成的 WHO */ }
+    return typeof WHO === 'string' ? WHO : ''
   }
-
-  function fileUrl(c, rel) {
-    return API + '/file?root=' + encodeURIComponent(state.root) + '&folder=' + encodeURIComponent(c.folder) + '&rel=' + encodeURIComponent(rel)
-  }
-
-  var GROUP_ORDER = ['正文', '人物剧本', '线索', '剧本', '手册', '其它']
-
-  function groupOf(rel) {
-    var i = rel.indexOf('/')
-    return i < 0 ? '正文' : rel.slice(0, i)
-  }
-
-  function renderPack(c) {
-    var byGroup = {}
-    c.files.forEach(function (x) {
-      var g = groupOf(x.rel)
-      ;(byGroup[g] = byGroup[g] || []).push(x)
-    })
-    var keys = Object.keys(byGroup).sort(function (a, b) {
-      var ia = GROUP_ORDER.indexOf(a), ib = GROUP_ORDER.indexOf(b)
-      if (ia < 0) ia = 99
-      if (ib < 0) ib = 99
-      return ia - ib || a.localeCompare(b, 'zh')
-    })
-    var textSection = (c.texts && c.texts.length)
-      ? '<div class="files"><div class="files-k">已抽出的文本 <em>' + c.texts.length + '</em></div>' +
-          c.texts.map(function (t) {
-            return '<button class="file" data-txt="' + esc(t.rel) + '" type="button">' +
-              '<span class="file-kind">txt</span>' +
-              '<span class="file-name">' + esc(t.txt) + '</span>' +
-              '<span class="file-size">' + (t.chars ? (t.chars / 1000).toFixed(1) + 'k 字' : '') + '</span>' +
-              '</button>'
-          }).join('') +
-        '</div>'
-      : ''
-    var sections = keys.map(function (g) {
-      var items = byGroup[g]
-      var imgs = items.filter(function (x) { return x.kind === 'image' })
-      var docs = items.filter(function (x) { return x.kind !== 'image' })
-      var rows = docs.map(function (x) {
-        return '<button class="file" data-rel="' + esc(x.rel) + '" data-kind="' + esc(x.kind) + '" type="button">' +
-          '<span class="file-kind">' + esc(x.ext.replace('.', '') || 'file') + '</span>' +
-          '<span class="file-name">' + esc(x.name) + '</span>' +
-          '<span class="file-size">' + esc(bytes(x.bytes)) + '</span>' +
-          '</button>'
-      }).join('')
-      var thumbs = imgs.length
-        ? '<div class="thumbs">' + imgs.map(function (x) {
-            return '<button class="thumb" data-rel="' + esc(x.rel) + '" type="button" title="' + esc(x.name) + '">' +
-              '<img loading="lazy" alt="' + esc(x.name) + '" src="' + esc(fileUrl(c, x.rel)) + '" /></button>'
-          }).join('') + '</div>'
-        : ''
-      return '<div class="files"><div class="files-k">' + esc(g) + ' <em>' + items.length + '</em></div>' + rows + thumbs + '</div>'
-    }).join('')
-
-    var warns = (c.warnings && c.warnings.length)
-      ? '<div class="warn">' + esc(c.warnings.join('；')) + '</div>'
-      : ''
-    var missing = (c.counts.pdf || 0) - ((c.texts || []).length)
-    var note = c.hasText
-      ? '<div class="pack-note is-ok">已抽出纯文本，缓存在 <code>' + esc(c.textDir || '') + '</code>（DM 读这一份，不必再解析 PDF；来源目录不会被写入）' +
-        (missing > 0 ? '<br />另有 ' + missing + ' 份 PDF 抽不出文字（多为扫描件或字体加密），直接点开 PDF 看。' : '') + '</div>'
-      : '<div class="pack-note">这本没有 <code>case.yml</code>，按资料夹展示。开局前建议先「抽出文字」，把 PDF 变成可直接读的 txt。</div>'
-
-    $('dossier').innerHTML =
-      '<div class="dossier-inner">' +
-        '<button class="backlink" type="button">← 返回列表</button>' +
-        '<div class="eyebrow">pack · ' + (c.players ? esc(String(c.players)) + ' 人本 · ' : '') + c.files.length + ' 个文件</div>' +
-        '<h1 class="title">' + esc(c.title) + '</h1>' +
-        '<div class="tags"><span class="tag">资料夹</span>' +
-          (c.counts.pdf ? '<span class="tag">PDF ' + c.counts.pdf + '</span>' : '') +
-          (c.counts.image ? '<span class="tag">图片 ' + c.counts.image + '</span>' : '') +
-          (c.counts.doc ? '<span class="tag">文档 ' + c.counts.doc + '</span>' : '') +
-        '</div>' +
-        '<div class="facts">' + fact('人数', c.players ? c.players + ' 人' : '未标注') + fact('文件', c.files.length + ' 个') +
-          fact('PDF', c.counts.pdf || 0) + fact('体积', bytes(c.bytes)) + '</div>' +
-        warns + note +
-        '<div class="screen" id="screen"><div class="screen-k">体检 <em>导入前先看这一栏</em></div>' +
-          '<div class="screen-body">正在体检这本…</div></div>' +
-        textSection + sections +
-        '<div class="actions">' +
-          '<button class="primary" id="btn-open" type="button">开这一局</button>' +
-          '<button class="ghost" id="btn-extract" type="button">' + (c.hasText ? '重新抽出文字' : '抽出文字') + '</button>' +
-          '<button class="ghost" id="btn-open-dir" type="button">打开文件夹</button>' +
-          '<button class="ghost" id="btn-copy-path" type="button">复制路径</button>' +
-        '</div>' +
-        '<p class="hint">资料夹本没有结构化档案：「开这一局」把原件摊在对局室里 —— 先读手册，再按座位发人物剧本和线索。原文优先于模型常识。</p>' +
-      '</div>'
-
-    var ts2 = tableSave(c)
-    if (ts2) {
-      $('btn-open').textContent = '继续这一局'
-      var hp2 = $('dossier').querySelector('.hint')
-      if (hp2) hp2.textContent = hp2.textContent + '（未完对局：第 ' + ts2.act + ' 幕 · ' + ts2.turns + ' 句对白 · ' + (ts2.running ? '计时在走' : '已停表') + '）'
+  function seatKeyOf(c) { return state.root + '|' + c.folder }
+  function seatsCached(c) { return SEAT_MAP[seatKeyOf(c)] || [] }
+  function seatLabelOf(s) { return (s && s.name) || ((s && s.via) === 'local' ? '房主' : '另一位玩家') }
+  function mySeatOf(c) {
+    var arr = seatsCached(c)
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i] && arr[i].mine === true) return Number(arr[i].seat)
     }
-    $('btn-open').addEventListener('click', function () { openTable(c) })
-    $('btn-open-dir').addEventListener('click', function () { reveal(c.dir) })
-    $('btn-copy-path').addEventListener('click', function () { copyText(c.dir, '路径已复制') })
-    $('btn-extract').addEventListener('click', function () { extract(c) })
-    loadScreen(c)
-    Array.prototype.forEach.call($('dossier').querySelectorAll('.file'), function (el) {
-      el.addEventListener('click', function () { preview(c, el.getAttribute('data-rel'), el.getAttribute('data-kind')) })
+    return tableMe(c)
+  }
+  function postClaim(c, idx, name, done) {
+    fetch(API + '/seats/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: state.root, folder: c.folder, seat: idx, who: seatWho(), name: name == null ? nick() : name })
     })
-    Array.prototype.forEach.call($('dossier').querySelectorAll('.thumb'), function (el) {
-      el.addEventListener('click', function () { preview(c, el.getAttribute('data-rel'), 'image') })
-    })
-    Array.prototype.forEach.call($('dossier').querySelectorAll('[data-txt]'), function (el) {
-      el.addEventListener('click', function () {
-        var rel = el.getAttribute('data-txt')
-        var url = API + '/text?root=' + encodeURIComponent(state.root) + '&folder=' + encodeURIComponent(c.folder) + '&rel=' + encodeURIComponent(rel)
-        var name = rel.replace(/\.pdf$/i, '.txt')
-        fetch(url, { cache: 'no-store' })
-          .then(function (r) { return r.text() })
-          .then(function (t) { previewUrl(url, name, false, t) },
-            function () { previewUrl(url, name, false, '读不出来：' + url) })
+      .then(function (r) {
+        return r.json().catch(function () { return {} }).then(function (j) { return { status: r.status, j: j || {} } })
       })
-    })
+      .then(function (got) { if (typeof done === 'function') done(got.j, got.status) })
+      .catch(function () { if (typeof done === 'function') done(null, 0) })
   }
-
-  // ---------- 体检与导入 ----------
-  var VERDICT = {
-    ready: { k: 'ready', label: '可以直接导入', line: '关键项都认得出来：文字、人数、角色、引子、线索都有下落。' },
-    partial: { k: 'partial', label: '有缺项', line: '能导入，但不全 —— 缺的那几项下面标出来了。' },
-    blocked: { k: 'blocked', label: '不建议导入', line: '一份可读的文字都没抽出来；导入后只会多一个读不了的资料夹。' }
-  }
-
-  function loadScreen(c) {
-    var box = $('screen')
-    if (!box) return
-    fetch(API + '/screen?root=' + encodeURIComponent(state.root) + '&folder=' + encodeURIComponent(c.folder), { cache: 'no-store' })
+  function loadSeats(c, cb) {
+    var u = API + '/seats?root=' + encodeURIComponent(state.root) + '&folder=' + encodeURIComponent(c.folder) +
+      '&who=' + encodeURIComponent(seatWho())
+    fetch(u, { cache: 'no-store' })
       .then(function (r) { return r.json() })
       .then(function (j) {
-        if (!j || !j.ok) throw new Error((j && j.error) || '体检失败')
-        renderScreen(c, j.screen)
+        if (j && j.ok) SEAT_MAP[seatKeyOf(c)] = j.seats || []
+        if (typeof cb === 'function') cb()
       })
-      .catch(function (e) {
-        box.innerHTML = '<div class="screen-k">体检</div>' +
-          '<div class="check"><span class="dot is-warn"></span><span class="check-l">体检没跑起来</span>' +
-          '<span class="check-d">' + esc(e.message) + '</span></div>'
-      })
+      .catch(function () { /* 拉不到座位就当没人占，不挡人玩 */ })
+  }
+  function seatRowHtml(c, mineIdx) {
+    var taken = {}
+    var srvMine = -1
+    seatsCached(c).forEach(function (s) {
+      if (!s) return
+      if (s.mine === false) taken[Number(s.seat)] = s
+      else if (s.mine === true) srvMine = Number(s.seat)
+    })
+    var mySeat = srvMine >= 0 ? srvMine : mineIdx
+    return (c.roles || []).map(function (r, i) {
+      var mine = mySeat >= 0 ? i === mySeat : r.player === 'human'
+      var s = taken[i]
+      if (s && !mine) {
+        var label = seatLabelOf(s)
+        return '<button class="seat is-taken" data-me="' + i + '" type="button" disabled title="这一席已经被「' +
+          esc(label) + '」选了"><b>' + esc(r.name || r.id) + '</b><em>（' + esc(label) + '）</em></button>'
+      }
+      // 自己真认领了的席写昵称；只按 case 的 human 标记高亮的那一席仍写「你」
+      var em = mine ? '你' : 'AI'
+      if (mySeat >= 0 && i === mySeat) em = '（' + esc(nick()) + '）'
+      return '<button class="seat' + (mine ? ' is-human' : '') + '" data-me="' + i + '" type="button" title="' +
+        (mine ? '你现在演这个' : '选他当你演的角色') + '"><b>' + esc(r.name || r.id) + '</b><em>' + em + '</em></button>'
+    }).join('')
+  }
+  function paintSeatRow(c) {
+    if (!c) return
+    // 档案页可能已经翻到别的本了 —— 只重画当前这本的座位
+    if (!state.active || state.active.folder !== c.folder) return
+    var row = $('dossier') && $('dossier').querySelector('.seat-row')
+    if (!row) return
+    row.innerHTML = seatRowHtml(c, tableMe(c))
+    Array.prototype.forEach.call(row.querySelectorAll('.seat[data-me]'), function (el) {
+      el.addEventListener('click', function () { pickSeat(c, Number(el.getAttribute('data-me'))) })
+    })
+  }
+  var SEAT_POLL = null
+  function startSeatPoll() {
+    if (SEAT_POLL) clearInterval(SEAT_POLL)
+    // 12 秒一次：页开着就等于给自己的席位续期（GET 顺带保鲜 2 分钟），也顺手把别人的占位刷出来
+    SEAT_POLL = setInterval(function () {
+      var c = state.active
+      if (!c) return
+      // 对局室开着时由 table.js 自己那份 12 秒轮询负责（它还要停/起），这边让位，别双跑同一份请求
+      var tbl = $('table')
+      if (tbl && !tbl.hidden) return
+      if (!$('dossier') || !$('dossier').querySelector('.seat-row')) return
+      loadSeats(c, function () { paintSeatRow(c) })
+    }, 12000)
+  }
+
+  // 在档案页直接点座位换人（对局室打开时读的是同一份存档）
+  function pickSeat(c, idx) {
+    var taken = {}
+    seatsCached(c).forEach(function (s) { if (s && s.mine === false) taken[Number(s.seat)] = s })
+    if (taken[idx] && taken[idx].mine !== true) {
+      toast('这一席已经被「' + seatLabelOf(taken[idx]) + '」选了，换一个')
+      return
+    }
+    postClaim(c, idx, nick(), function (j, status) {
+      if (j && j.ok === true) {
+        SEAT_MAP[seatKeyOf(c)] = j.seats || []
+        var k = 'gd:table:' + state.root + '|' + c.folder
+        var st = { act: 1, dealt: [], note: '', t0: Date.now(), seat: idx, tab: 'roles', me: idx }
+        try { var raw = localStorage.getItem(k); if (raw) st = JSON.parse(raw) } catch (e) { /* 坏档就重开 */ }
+        st.me = idx
+        st.seat = idx
+        try { localStorage.setItem(k, JSON.stringify(st)) } catch (e) { /* 存不下不致命 */ }
+        // 只重画座位那一排：renderCase 会把 #dossier 整页换掉（滚动位置清零、正文闪一下）
+        paintSeatRow(c)
+        toast('你现在演：' + (((c.roles || [])[idx] || {}).name || ('座位 ' + idx)))
+        return
+      }
+      if (status === 409 || (j && j.error === 'seat-taken')) {
+        toast('这一席已经被「' + seatLabelOf(j && j.holder) + '」选了，换一个')
+        loadSeats(c, function () { paintSeatRow(c) })
+        return
+      }
+      if (status === 0) toast('选座位没成功，网络不通')
+      else toast('选座位没成功，再点一次')
+    })
   }
 
   var GAPS_AUTO = {}
-
-  function gapsReport(root, folder, btn, out) {
-    if (!root || !folder || !out) return
-    btn.disabled = true
-    btn.textContent = '在读这本…'
-    out.hidden = false
-    out.innerHTML = '<p class="peek-k">模型在通读这一本的文件与正文（约一分钟）。它只总结材料里看得见的缺件，不会替本子编内容。</p>'
-    fetch(API + '/case/gaps', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ root: root, folder: folder })
-    })
-      .then(function (r) { return r.json() })
-      .then(function (j) {
-        btn.disabled = false
-        btn.textContent = '看看缺什么'
-        if (!j || !j.ok) {
-          out.innerHTML = '<p class="peek-hint is-bad">' + esc((j && j.error) || '接口没应答') + '</p>'
-          return
-        }
-        var rows = String(j.text).split('\n').map(function (x) { return x.replace(/^[-\u2022\s]+/, '').trim() }).filter(Boolean)
-        out.innerHTML = '<div class="gaps-k">缺件总结 · 只按材料，不补充</div><ul class="gaps-list">' +
-          rows.map(function (x) { return '<li>' + esc(x) + '</li>' }).join('') + '</ul>' +
-          '<p class="peek-k">' + esc((j.model || '') + (j.ms ? ' · ' + Math.round(j.ms / 1000) + ' 秒' : '')) + '</p>'
-      })
-      .catch(function (e) {
-        btn.disabled = false
-        btn.textContent = '看看缺什么'
-        out.innerHTML = '<p class="peek-hint is-bad">' + esc(e.message) + '</p>'
-      })
-  }
-
-  function renderScreen(c, s) {
-    var box = $('screen')
-    if (!box) return
-    var v = VERDICT[s.verdict] || VERDICT.partial
-    var okN = s.checks.filter(function (x) { return x.level === 'ok' }).length
-    var rows = s.checks.map(function (x) {
-      return '<div class="check"><span class="dot is-' + esc(x.level) + '"></span>' +
-        '<span class="check-l">' + esc(x.label) + '</span>' +
-        '<span class="check-d">' + esc(x.detail) + '</span></div>'
-    }).join('')
-    var bits = []
-    if (s.spec && s.spec.players) bits.push(s.spec.players + ' 人')
-    if (s.spec && s.spec.playersDetail) bits.push(s.spec.playersDetail)
-    if (s.spec && s.spec.genre) bits.push(s.spec.genre)
-    if (s.spec && s.spec.difficulty) bits.push(s.spec.difficulty)
-    if (s.spec && s.spec.duration) bits.push(s.spec.duration)
-    if (s.chars) bits.push((s.chars / 1000).toFixed(1) + 'k 字')
-    var hint = s.verdict === 'blocked'
-      ? '体检没过：先补一份能抽出文字的正文再导入。只想留个档，也可以强制导入。'
-      : '导入会把原始文件拷进本子库的 _source/，抽出的文字一起带过去（_text/），然后在档案页按本子读。'
-    box.innerHTML =
-      '<div class="screen-k">体检 <em>' + esc(v.label) + '</em></div>' +
-      '<div class="verdict is-' + esc(v.k) + '"><b>' + esc(v.label) + '</b><span>' + esc(v.line) + '</span>' +
-        '<em>' + okN + ' / ' + s.checks.length + ' 项通过</em></div>' +
-      (bits.length ? '<div class="spec-line">' + esc(bits.join(' · ')) + '</div>' : '') +
-      '<div class="checks">' + rows + '</div>' +
-      '<div class="importbar"><button class="primary" id="btn-import" type="button">' +
-        (s.verdict === 'blocked' ? '强行导入' : '导入成本子') + '</button>' +
-        '<button class="ghost sm" id="btn-gaps-pack" type="button">看看缺什么</button>' +
-        '<span class="import-hint">' + esc(hint) + '</span></div>' +
-      '<div class="gaps-out" id="gaps-out-pack" hidden></div>'
-    $('btn-import').addEventListener('click', function () {
-      if (s.verdict === 'blocked') {
-        var go = window.confirm('这本一份文字都没抽出来（' + s.fileCount + ' 个文件，' +
-          (s.checks.filter(function (x) { return x.level === 'fail'; }).length) + ' 项没过）。\n\n仍然导入吗？导入后只有原始资料，AI 读不到正文。')
-        if (!go) return
-        doImport(c, true)
-        return
-      }
-      doImport(c, false)
-    })
-    var gp = $('btn-gaps-pack')
-    if (gp) gp.addEventListener('click', function () { gapsReport(state.root, c.folder, gp, $('gaps-out-pack')) })
-    if ((s.verdict === 'partial' || s.verdict === 'blocked') && !GAPS_AUTO[c.folder]) {
-      GAPS_AUTO[c.folder] = 1
-      if (gp) gapsReport(state.root, c.folder, gp, $('gaps-out-pack'))
-    }
-  }
-
-  function doImport(c, force) {
-    var btn = $('btn-import')
-    if (btn) { btn.disabled = true; btn.textContent = '正在拷…' }
-    fetch(API + '/import', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ root: state.root, folder: c.folder, force: force === true })
-    })
-      .then(function (r) {
-        return r.json().then(function (j) { return { status: r.status, body: j } })
-      })
-      .then(function (out) {
-        var j = out.body
-        if (!j || !j.ok) {
-          if (out.status === 422) {
-            var go = window.confirm('体检没过：' + (j.error || '没有可读文字') + '\n\n仍然把整包拷进本子库吗？（会生成一本只有原始资料的档案）')
-            if (go) return doImport(c, true)
-            if (btn) { btn.disabled = false; btn.textContent = '导入成本子' }
-            return
-          }
-          throw new Error((j && j.error) || '导入失败')
-        }
-        toast((j.updated ? '已刷新：' : '已导入：') + j.folder + '（原始资料在 _source/，文字在 _text/）', 4600)
-        return loadCases(state.roots[0], false).then(function () {
-          if (j.folder) select(j.folder)
-        })
-      })
-      .catch(function (e) {
-        toast('导入失败：' + e.message, 4600)
-        if (btn) { btn.disabled = false; btn.textContent = '导入成本子' }
-      })
-  }
-
-  // ---------- 预览 ----------
-  function preview(c, rel, kind) {
-    var url = fileUrl(c, rel)
-    if (kind === 'image') {
-      previewUrl(url, rel, true)
-      return
-    }
-    if (kind === 'pdf') {
-      $('viewer-name').textContent = rel
-      $('viewer-raw').href = url
-      $('viewer-body').innerHTML = '<iframe class="viewer-frame" src="' + esc(url) + '" title="' + esc(rel) + '"></iframe>'
-      $('viewer').hidden = false
-      return
-    }
-    // 文本类（txt/md）：直接取回、当等宽正文看，不要塞 iframe
-    fetch(url, { cache: 'no-store' }).then(function (r) { return r.text() }).then(function (t) {
-      previewUrl(url, rel, false, t)
-    }, function () { previewUrl(url, rel, false, '读不出来：' + url) })
-  }
-
-  function previewUrl(url, name, isImage, text) {
-    $('viewer-name').textContent = name
-    $('viewer-raw').href = url
-    if (isImage) {
-      $('viewer-body').innerHTML = '<img class="viewer-img" src="' + esc(url) + '" alt="' + esc(name) + '" />'
-    } else if (typeof text === 'string') {
-      $('viewer-body').innerHTML = '<pre class="viewer-text">' + esc(text) + '</pre>'
-    } else {
-      $('viewer-body').innerHTML = '<iframe class="viewer-frame" src="' + esc(url) + '" title="' + esc(name) + '"></iframe>'
-    }
-    $('viewer').hidden = false
-  }
-  function closeViewer() {
-    $('viewer').hidden = true
-    $('viewer-body').innerHTML = ''
-  }
-
-  function extract(c) {
-    var btn = $('btn-extract')
-    btn.disabled = true
-    btn.textContent = '正在抽…'
-    fetch(API + '/extract', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ root: state.root, folder: c.folder }),
-    })
-      .then(function (r) { return r.json() })
-      .then(function (j) {
-        if (!j || !j.ok) throw new Error((j && j.error) || '抽不出来')
-        if (!j.made || j.made.length === 0) throw new Error('没有可抽的 PDF' + (j.failed && j.failed.length ? '（失败：' + j.failed.join('、') + '）' : ''))
-        toast('已抽出 ' + j.made.length + ' 份文本' + (j.failed && j.failed.length ? '，' + j.failed.length + ' 份失败' : ''), 3200)
-        return select(c.folder)
-      })
-      .catch(function (e) {
-        toast('抽出失败：' + e.message, 4200)
-        btn.disabled = false
-        btn.textContent = c.hasText ? '重新抽出文字' : '抽出文字'
-      })
-  }
-
-  function reveal(path) {
-    fetch(API + '/reveal', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: path }) })
-      .then(function (r) { return r.json() })
-      .then(function (j) {
-        if (!j || !j.ok) {
-          var code = (j && j.error) || '打不开'
-          throw new Error(code === 'reveal-host-only' ? '「打开文件夹」只能在那台电脑上点' : code)
-        }
-        toast('已在资源管理器里打开', 2600)
-      })
-      .catch(function (e) { toast('打不开文件夹：' + e.message) })
-  }
 
   // 手机端：档案页里的「返回列表」
   $('dossier').addEventListener('click', function (ev) {
@@ -722,12 +405,31 @@
     if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' })
   })
 
+  // 缺项复核 / 按复核结果重算 / AI 补全 / 撤销：档案页里按 data-gd-act 分派（事件委托，不写 inline onclick）。
+  $('dossier').addEventListener('click', function (ev) {
+    var el = ev.target && ev.target.closest ? ev.target.closest('[data-gd-act]') : null
+    if (!el) return
+    var act = el.getAttribute('data-gd-act')
+    var folder = el.getAttribute('data-gd-folder') || (state.active && state.active.folder) || ''
+    if (!folder) return
+    if (act === 'review') runPackReview(folder, el)
+    else if (act === 'recompute') packRecompute(folder, el)
+    else if (act === 'fill-one') packFill(folder, el, el.getAttribute('data-gd-key') || '')
+    else if (act === 'gotofill') gotoAiFill()
+    else if (act === 'undo') packUndo(folder, el.getAttribute('data-gd-key') || '', el.getAttribute('data-gd-label') || '', el)
+    else if (act === 'playtest') runPackPlaytest(folder, el, el.getAttribute('data-gd-force') === '1')
+  })
+
   // ---------- 选中 ----------
   function select(folder) {
     var hit = state.cases.filter(function (c) { return c.folder === folder })[0]
     if (!hit) return
     state.active = hit
     document.body.classList.add('is-detail')
+    // 选好这本就立刻重画房间条（拿上一次的快照重画，不等心跳回包）：标题当场变成
+    // 「准备开：某本 · 还没开房」，chips 也立刻换成这本的。
+    try { var rbc0 = rb.current(); roombarPaint(rbc0.r, rbc0.via, true) } catch (e) { /* 画不出来不碍事 */ }
+    try { roomBeat() } catch (e) { /* 心跳失败不碍事 */ }
     renderList()
     fetch(API + '/case?root=' + encodeURIComponent(state.root) + '&folder=' + encodeURIComponent(folder), { cache: 'no-store' })
       .then(function (r) { return r.json() })
@@ -762,11 +464,12 @@
         renderLibSelect()
         var wanted = keepActive && state.active ? state.active.folder : (state.cases[0] && state.cases[0].folder)
         if (state.roots.length > 1) state.filter = state.filter
+        renderChips()
         renderList()
         if (state.cases.length === 0) {
           state.active = null
           $('dossier').innerHTML = '<article class="empty"><p class="empty-k">这个书库还是空的</p><p class="empty-l">' +
-            '根目录：<code>' + esc(state.dir) + '</code><br />一个本子一个子目录；有 <code>case.yml</code> 就按结构化读，没有就按资料夹读。<br />' +
+            '根目录：<code>' + esc(state.root) + '</code><br />一个本子一个子目录；有 <code>case.yml</code> 就按结构化读，没有就按资料夹读。<br />' +
             '也可以点左上「＋ 目录」把别处的本子合辑加进来。</p>' +
             '<button class="primary" id="empty-new" type="button">新建第一本</button></article>'
           $('empty-new').addEventListener('click', openSheet)
@@ -779,6 +482,28 @@
         $('cases').innerHTML = '<div class="empty" style="text-align:left;margin:24px 8px"><p class="empty-k" style="font-size:16px">读不到书库</p><p class="empty-l">' + esc(e.message) + '</p></div>'
         toast('读不到书库：' + e.message)
       })
+  }
+
+  // 只刷清单、不重选：抽取/体检收尾后把新落的 meta（标签 + 排序）捞回来，别打断正在看的档案页。
+  function reloadListQuiet() {
+    var qs = state.root ? '?root=' + encodeURIComponent(state.root) : ''
+    return fetch(API + '/cases' + qs, { cache: 'no-store' })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        if (!j || !j.ok) return null
+        state.roots = j.roots && j.roots.length ? j.roots : [j.dir]
+        state.root = j.dir
+        state.cases = j.cases || []
+        if (state.active) {
+          var hit = state.cases.filter(function (x) { return x.folder === state.active.folder })[0]
+          if (hit) state.active = hit
+        }
+        renderLibSelect()
+        renderChips()
+        renderList()
+        return state.cases
+      })
+      .catch(function () { return null })
   }
 
   function addRoot() {
@@ -803,27 +528,50 @@
   var A_LAST = null
   var A_POLL = null
 
-  function contentCard(it) {
-    return '<div class="mode is-content" data-folder="' + esc(it.folder) + '" role="button" tabindex="0" title="按这份资料开一局材料局">' +
-      '<button class="ar-kill" type="button" data-kill="' + esc(it.folder) + '" title="从内容库移除">×</button>' +
-      '<span class="mode-no">材料 ' + esc(it.id) + ' / ' + esc(it.scheme) + '</span>' +
-      '<span class="mode-name">' + esc(it.title) + '</span>' +
-      '<span class="mode-line">' + esc(it.note || '主持人照这份资料现编现裁') + '</span>' +
-      '<span class="mode-tag">' + (Number(it.chars) > 0 ? '已读 ' + Number(it.chars) + ' 字 · ' + it.files + ' 文件' : '还没抽出文字') + (it.players ? ' · ' + esc(it.players) : '') + '</span>' +
-      '</div>'
+  function arcTag(it) {
+    return esc((Number(it.chars) > 0 ? '已读 ' + Number(it.chars) + ' 字 · ' + it.files + ' 文件' : '还没抽出文字') + (it.players ? ' · ' + it.players : ''))
   }
+
+  // 玩法 id → 中文名（导入弹层的提示与 toast 用；未知 id 原样显示）
+  var ARC_SCHEME_CN = {
+    soup: '海龟汤',
+    detective: '侦探推理',
+    escape: '密室逃脱',
+    party: '剧本杀·反转',
+    loop: '时间循环',
+    council: '王国议会',
+    trpg: '单人跑团'
+  }
+  var A_TAB = 'folder'
 
   function renderArcade(modes) {
     ARC_MODES = modes
+    // 内容卡不再铺进网格（2026-11-20 需求）：归到某一档玩法的都收进那张卡右下角的「更多 N」，
+    // 网格只留玩法卡 + 没归类的散装内容 + 「导入内容」。一份几条、几个文本文件、多少字，点开「更多」一次看清。
+    var allItems = ARC_ITEMS || []
+    var known = {}
+    modes.forEach(function (m) { known[m.id] = 1 })
+    var looseItems = allItems.filter(function (x) { return !known[x.scheme] })
+    // button 里不能嵌 button：每张玩法卡包一层 .mode-wrap，把「＋导入」放在旁边做绝对定位。
     $('modes').innerHTML = modes.map(function (m) {
-      return '<button class="mode" data-id="' + esc(m.id) + '" type="button">' +
+      return '<div class="mode-wrap">' +
+        '<button class="mode" data-id="' + esc(m.id) + '" type="button">' +
         '<span class="mode-no">' + esc(m.no) + ' / ' + esc(m.id) + '</span>' +
         '<span class="mode-name">' + esc(m.name) + '</span>' +
         '<span class="mode-line">' + esc(m.line) + '</span>' +
         '<span class="mode-tag">' + esc(m.tag + (m.players ? ' · ' + m.players : '')) + '</span>' +
-        '</button>'
+        '</button>' +
+        '<button class="mode-imp" type="button" data-imp="' + esc(m.id) + '" title="往「' + esc(m.name) + '」里加一份内容">＋导入</button>' +
+        (function () {
+          var mine = allItems.filter(function (x) { return x.scheme === m.id })
+          if (!mine.length) return ''
+          var files = 0
+          mine.forEach(function (x) { files += Number(x.files) || 0 })
+          return '<button class="mode-more" type="button" data-more="' + esc(m.id) + '" title="看「' + esc(m.name) + '」里的 ' + mine.length + ' 份内容 / ' + files + ' 个文本文件">更多 ' + mine.length + '</button>'
+        })() +
+        '</div>'
     }).join('') +
-      (ARC_ITEMS || []).map(contentCard).join('') +
+      looseItems.map(contentCard).join('') +
       '<div class="mode is-add" role="button" tabindex="0" title="导入一个资料夹到内容库">' +
       '<span class="mode-plus">＋</span><span class="mode-name">导入内容</span>' +
       '<span class="mode-line">案例集 / 小说 / 设定集 → 材料局</span></div>'
@@ -847,9 +595,34 @@
     fetch(API + '/arcade', { cache: 'no-store' })
       .then(function (r) { return r.json() })
       .then(function (j) {
-        if (j && j.ok) { ARC_ITEMS = j.items || []; if (ARC_MODES) renderArcade(ARC_MODES) }
+        if (j && j.ok) { ARC_ITEMS = j.items || []; if (ARC_MODES) renderArcade(ARC_MODES); refreshArcMore() }
       })
       .catch(function () { /* 内容库读不到就只列七种玩法 */ })
+  }
+
+  function arcadeSplit(folder, btn) {
+    // 拆包：把「一个条目里装了多份汤」的合集按场景拆成一条一碗汤（后端 /api/arcade/split）
+    if (!folder) return
+    var label = btn ? btn.textContent : ''
+    if (btn) { btn.disabled = true; btn.textContent = '拆分中…' }
+    var done = function (msg, ms) {
+      if (btn) { btn.disabled = false; btn.textContent = label || '拆分' }
+      toast(msg, ms || 5200)
+    }
+    fetch(API + '/arcade/split', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ folder: folder })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j } }) })
+      .then(function (x) {
+        if (!x.ok || !x.j || !x.j.ok) { done('拆分失败：' + ((x.j && x.j.error) || '未知错误')); return }
+        var made = x.j.made || []
+        var names = made.slice(0, 3).map(function (m) { return m.title }).join('、')
+        done('已拆出 ' + made.length + ' 条：' + names + (made.length > 3 ? ' 等' : '') + '（原条目保留，可自己删）', 7000)
+        loadArcadeExtra()
+      })
+      .catch(function (e) { done('拆分失败：' + e.message) })
   }
 
   function deleteArcade(folder) {
@@ -865,20 +638,58 @@
   }
 
   // ---------- 游戏厅 · 导入内容 ----------
-  function openArcadeImport() {
+  // 两个页签：资料夹（抽字后登记）/ 手写一条（不建资料夹，直接落一段正文）。
+  // 玩法下拉与人数是两边共用的同一个控件（#a-scheme / #a-players），不重复 id。
+  function arcadeTab(which) {
+    A_TAB = which === 'hand' ? 'hand' : 'folder'
+    var hand = A_TAB === 'hand'
+    var folder = $('a-pane-folder')
+    var pane = $('a-pane-hand')
+    if (folder) folder.hidden = hand
+    if (pane) pane.hidden = !hand
+    Array.prototype.forEach.call(document.querySelectorAll('#arcade-sheet .arcade-tab'), function (el) {
+      var on = el.getAttribute('data-atab') === A_TAB
+      el.classList.toggle('is-on', on)
+      el.setAttribute('aria-selected', on ? 'true' : 'false')
+    })
+    // 两个页签各有一个主按钮：资料夹=扫描并抽字，手写=保存这条
+    var scan = $('arcade-scan')
+    var save = $('a-hand-save')
+    if (scan) scan.hidden = hand
+    if (save) save.hidden = !hand
+  }
+  // scheme 给了（点了某张玩法卡的「＋导入」）= 预选该玩法 + 顶部提示；soup 默认落到手写页签。
+  // 从顶栏「导入内容」或「导入内容」卡进来时没有 scheme，保持老行为：不预选、资料夹页签。
+  function openArcadeImport(scheme) {
+    var sid = typeof scheme === 'string' ? scheme : ''
     $('arcade-sheet').hidden = false
     $('arcade-result').hidden = true
     $('arcade-result').innerHTML = ''
     A_LAST = null
     stopArcadePoll()
-    $('a-path').focus()
+    var hint = $('a-hint')
+    if (sid !== '' && ARC_SCHEME_CN[sid]) {
+      $('a-scheme').value = sid
+      if (hint) { hint.textContent = '这份会归到「' + ARC_SCHEME_CN[sid] + '」'; hint.hidden = false }
+      arcadeTab(sid === 'soup' ? 'hand' : 'folder')
+    } else {
+      if (hint) { hint.textContent = ''; hint.hidden = true }
+      arcadeTab('folder')
+    }
+    var first = A_TAB === 'hand' ? $('a-hand-title') : $('a-path')
+    if (first && first.focus) { try { first.focus() } catch (e) { /* 焦点抢不到不算错 */ } }
   }
   function closeArcadeImport() { $('arcade-sheet').hidden = true; stopArcadePoll() }
-  function stopArcadePoll() { if (A_POLL) { clearInterval(A_POLL); A_POLL = null } }
+  // 轮询已从 setInterval 改成 setTimeout 退避，两种都要清
+  function stopArcadePoll() {
+    if (A_POLL) { clearInterval(A_POLL); clearTimeout(A_POLL); A_POLL = null }
+  }
   function arcadePaint(pct, label, busy) {
     var box = $('arcade-result')
     box.hidden = false
-    box.innerHTML = '<div class="progress"><div class="progress-bar"><i class="' + (busy ? 'is-wait' : '') + '" style="width:' + Math.max(2, Math.min(100, Math.round(pct))) + '%"></i></div>' +
+    var pc = Math.max(2, Math.min(100, Math.round(pct)))
+    box.innerHTML = '<div class="progress"><div class="progress-top"><div class="progress-bar"><i class="' + (busy ? 'is-wait' : '') + '" style="width:' + pc + '%"></i></div>' +
+      '<span class="progress-pct">' + pc + '%</span></div>' +
       '<span class="progress-l">' + esc(label) + '</span></div>'
   }
   function arcadeReady(msg) {
@@ -893,13 +704,42 @@
     var btn = $('a-add')
     if (btn) btn.addEventListener('click', function () { arcadeAdd(btn) })
   }
+  // 进度轮询：一次丢包不再永久停（退避 800→1600→3200ms，最多 10 次）；
+  // 「登记进内容库」按钮与轮询解耦 —— done / error / 放弃三条路都会调 arcadeReady，
+  // 以前只有轮询成功路径调，轮询一死这个按钮就永不出现。
+  var A_FAILS = 0
   function arcadeWatch(root, folder) {
     stopArcadePoll()
+    A_FAILS = 0
     var q = '?root=' + encodeURIComponent(root) + '&folder=' + encodeURIComponent(folder)
-    A_POLL = setInterval(function () {
+    function again(ms) {
+      if (A_POLL) { clearInterval(A_POLL); clearTimeout(A_POLL) }
+      A_POLL = setTimeout(tick, ms)
+    }
+    function stopWithText(txt) {
+      if (A_POLL) { clearInterval(A_POLL); clearTimeout(A_POLL); A_POLL = null }
+      arcadePaint(0, txt, false)
+      arcadeReady('')
+    }
+    function lost() {
+      if (A_FAILS < 10) {
+        A_FAILS++
+        again(800 * Math.pow(2, Math.min(2, A_FAILS - 1)))
+        return
+      }
+      stopWithText('进度接口一直没应答（已重试 ' + A_FAILS + ' 次），可先用「登记进内容库」手动登记')
+    }
+    function tick() {
       fetch(API + '/extract/status' + q, { cache: 'no-store' })
         .then(function (r) { return r.json() })
         .then(function (j) {
+          if (!j || j.ok === false) {
+            // 接口答话了、但明确说不行（访客页 / 没权限 / 这本没见过）：给文案并停，别落到「排队中」
+            A_FAILS = 0
+            stopWithText('看不到抽取进度：' + errCn(j && j.error, '接口没应答'))
+            return
+          }
+          A_FAILS = 0
           var st = (j && j.extracting) || { state: 'idle' }
           if (j && j.ocr) st.ocr = j.ocr
           var done = Number(st.done) || 0
@@ -920,13 +760,17 @@
           } else if (st.state === 'error') {
             arcadePaint(30, '抽取出了错，仍可登记（多半没文字）', false)
             arcadeReady('')
+            return
           } else {
-            arcadePaint(88, '文字抽取完成', false)
+            arcadePaint(88, st.cached ? '这本之前抽过，已有文字' : '文字抽取完成', false)
             arcadeReady('')
+            return
           }
-        })
-        .catch(function () { stopArcadePoll(); arcadePaint(0, '进度接口没应答', false) })
-    }, 900)
+          again(900)
+        }, lost)
+        .catch(lost)
+    }
+    A_POLL = setTimeout(tick, 900)
   }
   function arcadeDirs(j) {
     var box = $('arcade-result')
@@ -962,8 +806,105 @@
       })
       .catch(function (e) { arcadePaint(0, '扫描失败：' + e.message, false) })
   }
+  var A_AUTO_POLL = 0
+  function arcadeAutoStop() { if (A_AUTO_POLL) { clearTimeout(A_AUTO_POLL); A_AUTO_POLL = 0 } }
+  // 自动整理导入（m05164）：一个子资料夹算一篇 —— 后端识文字（图片/扫描件走 OCR）后逐篇建条目，
+  // 这里只负责起任务 + 轮询进度。生成完就能在玩法卡上点「随机」每次换一篇。
+  function arcadeAutoImport(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '整理中…' }
+    arcadePaint(4, '自动整理：正在识文字并拆成一篇一篇…', true)
+    var reset = function () { if (btn) { btn.disabled = false; btn.textContent = '登记进内容库' } }
+    fetch(API + '/arcade/auto', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      root: A_LAST.root, folder: A_LAST.folder, scheme: ($('a-scheme') && $('a-scheme').value) || ''
+    }) })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || '启动失败')
+        tick()
+      })
+      .catch(function (e) { toast('自动整理启动失败：' + e.message, 5200); reset() })
+    function tick() {
+      fetch(API + '/arcade/auto/status', { cache: 'no-store' })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          var a = (j && j.auto) || {}
+          var total = Number(a.total) || 0
+          var done = Number(a.done) || 0
+          var pct = total ? Math.min(96, Math.round(done / total * 100)) : 6
+          var label = a.phase === 'ocr'
+            ? ('识文字：' + (a.rel || '') + '（' + Math.min(done + 1, total) + '/' + total + '）')
+            : ('整理中：' + (a.rel || '') + '（' + Math.min(done + 1, total) + '/' + total + '）')
+          arcadePaint(pct, label, true)
+          if (a.running) { A_AUTO_POLL = setTimeout(tick, 1400); return }
+          A_AUTO_POLL = 0
+          if (a.error) { arcadePaint(0, '整理失败：' + a.error, false); toast('自动整理失败：' + a.error, 6200); reset(); return }
+          var made = (a.made || []).length
+          var bad = (a.failed || []).length
+          arcadePaint(100, '已整理成 ' + made + ' 篇' + (bad ? '（失败 ' + bad + '）' : ''), false)
+          toast('已整理成 ' + made + ' 篇' + (bad ? '（失败 ' + bad + '）' : '') + '：玩法卡右下角点「随机」，每次换一篇', 7600)
+          closeArcadeImport()
+          loadArcadeExtra()
+        })
+        .catch(function () { A_AUTO_POLL = setTimeout(tick, 2200) })
+    }
+  }
+
+  // 随机挑一篇（m05164）：按玩法从内容库随机取一条并直接开材料局 —— 「每次重开换一篇」。
+  function arcadeRandom(scheme) {
+    if (!scheme) return
+    fetch(API + '/arcade/random', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scheme: scheme }) })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || '没有可随机的内容')
+        var it = j.entry
+        if (it && window.GameRoom) { it.root = state.root; window.GameRoom.open(it); toast('随机开：' + it.title, 3600) }
+        else if (it) toast('房间脚本没加载')
+      })
+      .catch(function (e) { toast('随机开失败：' + e.message, 5200) })
+  }
+
+  // ---------- 游戏厅 · 某一档的「更多」 ----------
+  // 内容卡不铺网格之后，一档玩法里到底有几份、几个文本文件，靠这个弹层交代。
+  var ARC_MORE = ''
+  function schemeItems(scheme) {
+    return (ARC_ITEMS || []).filter(function (x) { return x.scheme === scheme })
+  }
+  function moreRow(it) {
+    return '<div class="am-row" data-open="' + esc(it.folder) + '" role="button" tabindex="0" title="按这份资料开一局">' +
+      '<div class="am-t">' + esc(it.title) + '</div>' +
+      '<div class="am-m">' + arcTag(it) + '</div>' +
+      '<div class="am-acts">' +
+      (it.scheme === 'soup' && Number(it.files) >= 4
+        ? '<button class="am-b" type="button" data-amsplit="' + esc(it.folder) + '" title="按场景拆成一条一碗汤（合集用）">拆分</button>'
+        : '') +
+      '<button class="am-b" type="button" data-amkill="' + esc(it.folder) + '" title="从内容库移除">移除</button>' +
+      '</div></div>'
+  }
+  function openArcMore(scheme) {
+    var list = schemeItems(scheme)
+    var cn = ARC_SCHEME_CN[scheme] || scheme
+    if (!list.length) { toast('「' + cn + '」里还没有内容：点卡片上的「＋导入」加一份'); return }
+    ARC_MORE = scheme
+    var files = 0
+    var chars = 0
+    list.forEach(function (x) { files += Number(x.files) || 0; chars += Number(x.chars) || 0 })
+    $('arc-more-title').textContent = cn + ' · 内容库'
+    $('arc-more-sum').textContent = '共 ' + list.length + ' 份内容 · ' + files + ' 个文本文件 · ' + chars +
+      ' 字；点任意一条按它开一局。'
+    $('arc-more-list').innerHTML = list.map(moreRow).join('')
+    $('arc-more').hidden = false
+  }
+  function closeArcMore() { $('arc-more').hidden = true; ARC_MORE = '' }
+  // 内容库变了（拆分/移除/新登记）就照着新数据重画；画完空了直接把弹层收起。
+  function refreshArcMore() {
+    if (!$('arc-more') || $('arc-more').hidden) return
+    if (!schemeItems(ARC_MORE).length) { closeArcMore(); return }
+    openArcMore(ARC_MORE)
+  }
+
   function arcadeAdd(btn) {
     if (!A_LAST) return
+    if ($('a-auto') && $('a-auto').checked) { arcadeAutoImport(btn); return }
     if (btn) { btn.disabled = true; btn.textContent = '登记中…' }
     fetch(API + '/arcade', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
       root: A_LAST.root, folder: A_LAST.folder, scheme: $('a-scheme').value, title: ($('a-title').value || '').trim(), players: ($('a-players').value || '').trim()
@@ -978,6 +919,40 @@
       .catch(function (e) {
         toast('登记失败：' + e.message)
         if (btn) { btn.disabled = false; btn.textContent = '登记进内容库' }
+      })
+  }
+  // 手写一条：不碰资料夹、不抽字，直接 POST {scheme,title,text,truth,players}（body 里不能带 folder，
+  // 后端靠 folder === undefined 认这条新形态）。本地先校验，免得白跑一趟拿 400。
+  function arcadeHandSave() {
+    var btn = $('a-hand-save')
+    var scheme = $('a-scheme').value
+    var title = (($('a-hand-title') && $('a-hand-title').value) || '').trim()
+    var text = (($('a-hand-body') && $('a-hand-body').value) || '').trim()
+    var truth = (($('a-hand-truth') && $('a-hand-truth').value) || '').trim()
+    var players = (($('a-players') && $('a-players').value) || '').trim()
+    if (title === '') { toast('先给它起个名字（1~30 字）'); if ($('a-hand-title')) $('a-hand-title').focus(); return }
+    if (title.length > 30) { toast('名字最多 30 字'); return }
+    if (text.length < 10) { toast('材料正文至少 10 字，先把汤面写清楚'); if ($('a-hand-body')) $('a-hand-body').focus(); return }
+    if (truth.length > 20000) { toast('汤底最多 20000 字'); return }
+    if (btn) { btn.disabled = true; btn.textContent = '保存中…' }
+    fetch(API + '/arcade', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      scheme: scheme, title: title, text: text, truth: truth, players: players
+    }) })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || '保存失败')
+        var saved = (j.entry && j.entry.title) || title
+        toast('已加到「' + (ARC_SCHEME_CN[scheme] || scheme) + '」：' + saved)
+        if ($('a-hand-title')) $('a-hand-title').value = ''
+        if ($('a-hand-body')) $('a-hand-body').value = ''
+        if ($('a-hand-truth')) $('a-hand-truth').value = ''
+        if (btn) { btn.disabled = false; btn.textContent = '保存这条' }
+        closeArcadeImport()
+        loadArcadeExtra()
+      })
+      .catch(function (e) {
+        toast(e.message)
+        if (btn) { btn.disabled = false; btn.textContent = '保存这条' }
       })
   }
 
@@ -1194,7 +1169,8 @@
     box.innerHTML =
       '<div class="peek-k">' + esc(j.folder) + ' <em>' + nFiles + ' 个文件</em></div>' +
       banner +
-      '<div class="progress" id="peek-progress" hidden><div class="progress-bar"><i id="peek-pbar"></i></div>' +
+      '<div class="progress" id="peek-progress" hidden><div class="progress-top"><div class="progress-bar"><i id="peek-pbar"></i></div>' +
+        '<span class="progress-pct" id="peek-ppct">0%</span></div>' +
         '<div class="progress-l" id="peek-plabel"></div></div>' +
       checksHtml +
       '<div class="peek-files">' + peekFiles(j.entry || {}) + '</div>' +
@@ -1261,10 +1237,13 @@
     var lb = $('peek-plabel')
     var box = $('peek-progress')
     if (box) box.hidden = false
+    var pc = peekPct(st)
     if (el) {
       el.className = st && st.state === 'running' ? 'is-wait' : ''
-      el.style.width = peekPct(st) + '%'
+      el.style.width = pc + '%'
     }
+    var pn = $('peek-ppct')
+    if (pn) pn.textContent = pc + '%'
     if (lb) lb.textContent = peekLabel(st)
   }
 
@@ -1282,11 +1261,13 @@
       }
       el.className = ''
       el.style.width = '100%'
+      var pn = $('peek-ppct')
+      if (pn) pn.textContent = '100%'
       if (st.state === 'done') {
         lb.textContent = '抽完：成功 ' + (st.made || 0) + ' 份' + (st.failed ? '，失败 ' + st.failed + ' 份' : '') +
           (st.cached ? '（用的本地缓存）' : '') + '，' + sec + ' 秒'
       } else if (st.state === 'error') {
-        lb.textContent = '抽取出错：' + (st.error || '未知')
+        lb.textContent = '抽取出错：' + errCn(st.error, '未知')
       } else {
         lb.textContent = '没有可抽的文件'
       }
@@ -1296,7 +1277,23 @@
       fetch(API + '/extract/status?root=' + encodeURIComponent(root) + '&folder=' + encodeURIComponent(folder), { cache: 'no-store' })
         .then(function (r) { return r.json() })
         .then(function (j) {
-          if (!j || !j.ok) return
+          // 以前这里 !ok 直接 return：不重排、不报错、不画 —— 进度条永久冻在上一格，用户只能当它坏了。
+          if (!j || j.ok === false) {
+            var bar = $('peek-pbar')
+            var lab = $('peek-plabel')
+            var code = String((j && j.error) || '')
+            if (bar) bar.className = ''
+            if (/^(route-not-allowed|owner-only|forbidden)$/.test(code)) {
+              // 访客/远程页永远看不到房主那台机器的抽取进度：说清楚，别装作在跑
+              if (lab) lab.textContent = '这一步只有房主能做（远程/访客页）'
+              toast('抽取进度只有房主这台机器看得到', 4200)
+              return
+            }
+            var why = errCn(code, '进度接口没应答')
+            if (lab) lab.textContent = '抽取出错：' + why
+            toast('抽取出错：' + why, 4400)
+            return
+          }
           var ex = j.extracting || {}
           ex.ocr = j.ocr || null
           if (tick(ex)) { setTimeout(function () { scanPath(true) }, 400); return }
@@ -1330,7 +1327,7 @@
         btn.disabled = false
         btn.textContent = '扫描并体检'
         var j = out.body
-        if (!j || !j.ok) throw new Error((j && j.error) || ('读不到这个路径（HTTP ' + out.status + '）'))
+        if (!j || !j.ok) throw new Error(errCn(j && j.error, '读不到这个路径（HTTP ' + out.status + '）'))
         if (j.kind === 'case') {
           box.hidden = false
           box.innerHTML = '<div class="peek-k">这本已经有 <code>case.yml</code> <em>不用导入</em></div>' +
@@ -1378,38 +1375,63 @@
       })
   }
 
-  function pollImport(root, folder, forced) {
+  // ui 可选（档案页「导入成本子」也走这条轮询）：{btn, quiet, idleText, again, onDone}
+  // 不传 = 原来的弹层流程（importPeek → 这里），行为一字没变。
+  function pollImport(root, folder, forced, ui) {
+    var u = ui || {}
+    function setBtn(txt, disabled) {
+      var btn = u.btn || $('btn-peek-import')
+      if (!btn) return
+      btn.disabled = disabled === true
+      btn.textContent = txt
+    }
     function giveUp(msg) {
-      var btn = $('btn-peek-import')
-      if (btn) { btn.disabled = false; btn.textContent = '导入成本子' }
+      setBtn(u.idleText || '导入成本子', false)
       if (msg) toast(msg, 5200)
     }
+    function paint(st) { if (!u.quiet) paintPeek(st) }
+    var idleTries = 0
     function loop() {
       fetch(API + '/import/status?root=' + encodeURIComponent(root) + '&folder=' + encodeURIComponent(folder), { cache: 'no-store' })
         .then(function (r) { return r.json() })
         .then(function (j) {
           var st = (j && j.importing) || { state: 'idle' }
-          if (st.state === 'running') { st.ocr = j.ocr || null; paintPeek(st); peekPoll = setTimeout(loop, 700); return }
+          if (st.state === 'running') { st.ocr = j.ocr || null; paint(st); peekPoll = setTimeout(loop, 700); return }
+          if (st.state === 'done' && st.cancelled === true) {
+            // 取消后「跑完当前文件」也会进 done（宿主带 cancelled + error）：别显示成绿色的已完成
+            paint({ state: 'idle' })
+            giveUp('已取消：' + errCn(st.error, '跑完当前文件就停了'))
+            return
+          }
           if (st.state === 'done') {
-            paintPeek({ state: 'done', phase: 'done', elapsedMs: st.elapsedMs, done: st.total, total: st.total })
+            paint({ state: 'done', phase: 'done', elapsedMs: st.elapsedMs, done: st.total, total: st.total })
             var res = st.result || {}
-            toast((res.updated ? '已刷新：' : '已导入：') + (res.folder || folder), 4200)
+            importDoneToast(res.folder || folder, res.updated, res)
+            if (u.onDone) { u.onDone(res.folder || folder); return }
             setTimeout(closeImport, 900)
-            loadCases(state.roots[0], false).then(function () { select(res.folder || folder) })
+            // 用这个任务自己的 root（参数 root），别退回第一个书库
+            loadCases(root, false).then(function () { select(res.folder || folder) })
             return
           }
           if (st.state === 'error') {
             var out = st.result || {}
             if (out.code === 422 && !forced) {
-              if (window.confirm('体检没过：' + (st.error || '没有可读文字') + '\n\n仍然把整包拷进本子库吗？')) { importPeek(true); return }
-              paintPeek({ state: 'idle' })
+              if (window.confirm('体检没过：' + errCn(st.error, '没有可读文字') + '\n\n仍然把整包拷进本子库吗？')) {
+                if (u.again) u.again(folder)
+                else importPeek(true)
+                return
+              }
+              paint({ state: 'idle' })
               giveUp('')
               return
             }
-            paintPeek({ state: 'error' })
-            giveUp('导入失败：' + (st.error || '未知'))
+            paint({ state: 'error' })
+            giveUp('导入失败：' + errCn(st.error, ''))
             return
           }
+          // 一直 idle：任务可能被宿主重启清掉，或上一轮早就收尾了 —— 12 轮（约 15 秒）后放手，按钮别永远转
+          idleTries++
+          if (idleTries > 12) { paint({ state: 'idle' }); giveUp('没等到导入任务（宿主可能重启过）；再点一次') ; return }
           peekPoll = setTimeout(loop, 1200)
         })
         .catch(function () { peekPoll = setTimeout(loop, 1500) })
@@ -1417,124 +1439,451 @@
     loop()
   }
 
-  // ---------- 局域网 ----------
-  function lanPaint(st) {
-    var en = $('l-enable')
-    if (en) en.value = st.enabled ? 'on' : 'off'
-    var port = $('l-port')
-    if (port) port.value = st.port || 5288
-    $('l-key').textContent = st.key || '——'
-    var box = $('l-urls')
-    if (st.enabled && st.urls && st.urls.length) {
-      box.innerHTML = st.urls.map(function (u, i) {
-        var url = typeof u === 'string' ? u : u.url
-        var label = typeof u === 'string' ? '' : (u.label || '')
-        return '<div class="lan-url"><span>' + esc(url) + (label ? '<em>' + esc(label) + '</em>' : '') + '</span><button type="button" class="ghost sm" data-copy="' + i + '">复制</button></div>'
-      }).join('')
-      Array.prototype.forEach.call(box.querySelectorAll('[data-copy]'), function (b) {
-        b.addEventListener('click', function () {
-          var u = st.urls[Number(b.getAttribute('data-copy'))]
-          copyText(typeof u === 'string' ? u : u.url, '链接已复制，发到手机就能开')
-        })
-      })
-    } else if (st.enabled) {
-      box.innerHTML = '<div class="lan-none">服务起来了，但没查到局域网 IPv4 —— 这台机器可能没连 Wi-Fi / 网线。</div>'
-    } else {
-      box.innerHTML = '<div class="lan-none">关着。拨到「开」，同一 Wi-Fi 的设备就能用链接进来。</div>'
+  // ---------- 识图补齐（功能A，用户 m01150）：只对用户在档案页点出来的这一本跑，boot/后台永不主动 ----------
+  // 202 起后台任务后绝不 await 长请求；照 pollImport 的 700ms 轮询形态拿进度。
+  function runCaseOcr(folder, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '排队识图…' }
+    function restore(label) {
+      var b = $('btn-ocr')
+      if (b) { b.disabled = false; b.textContent = label || '识图补齐' }
     }
-    if (st.error) box.innerHTML += '<div class="lan-none is-bad">' + esc(String(st.error)) + '</div>'
-  }
-
-  function loadLan() {
-    fetch(API + '/lan', { cache: 'no-store' })
-      .then(function (r) { return r.json() })
-      .then(function (j) { if (j && j.ok) lanPaint(j.lan) })
-      .catch(function () { toast('局域网接口没应答') })
-  }
-
-  function lanSet(body, okMsg) {
-    fetch(API + '/lan', {
+    fetch(API + '/case/ocr', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ root: state.root, folder: folder })
     })
-      .then(function (r) { return r.json() })
-      .then(function (j) {
-        if (j && j.ok) { lanPaint(j.lan); if (okMsg) toast(okMsg) }
-        else toast('没改成：' + ((j && j.error) || '未知'))
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j } }) })
+      .then(function (out) {
+        var j = out.body
+        if (!j || !j.ok) { restore(); toast((j && j.error) || ('识图没起来（HTTP ' + out.status + '）'), 4600); return }
+        if (j.note) toast(j.note, 5600)
+        pollCaseOcr(folder, restore)
       })
-      .catch(function () { toast('局域网接口没应答') })
+      .catch(function (e) { restore(); toast('识图没起来：' + (e && e.message ? e.message : e), 4200) })
   }
 
-  // ---------- 公网房间（cloudflared 隧道）----------
-  var T_POLL = 0
-  var T_ERR = {
-    'cloudflared-not-installed': '没找到 cloudflared —— 装到 ~/.local/bin/cloudflared.exe 或 PATH 里再开',
-    'lan-not-running': '局域网服务没起来，隧道接不上 —— 先把上面的局域网开关拨到「开」',
-    'tunnel-timeout': '45 秒没连上 Cloudflare 边缘 —— 这台机器可能出不去公网',
-  }
-  function tunnelPaint(t) {
-    var en = $('t-enable')
-    if (en) en.value = (t.running || t.starting) ? 'on' : 'off'
-    var box = $('t-urls')
-    var warn = $('t-warn')
-    if (!box) return
-    if (t.starting) {
-      box.innerHTML = '<div class="lan-none">正在拉起隧道（cloudflared 连 Cloudflare 边缘，通常十几秒）…</div>'
-      if (warn) { warn.className = 't-warn'; warn.textContent = '' }
-      tunnelPoll()
-      return
-    }
-    if (t.running && t.link) {
-      box.innerHTML = '<div class="lan-url"><span>' + esc(t.link) + '<em>公网 · HTTPS</em></span><button type="button" class="ghost sm" id="t-copy">复制</button></div>'
-      $('t-copy').addEventListener('click', function () { copyText(t.link, '公网链接已复制 —— 发给谁，谁就能进这间房') })
-      if (warn) {
-        warn.className = 't-warn'
-        warn.textContent = '随开随换：关掉再开就是新地址。公网只认 16 位长钥匙（局域网短钥匙在公网无效）。拿到链接的人能用你的模型额度请 DM —— 别把链接发到公开场合。'
-      }
-    } else {
-      box.innerHTML = '<div class="lan-none">关着。开了会用本机 cloudflared 出一条只出不进的 HTTPS 隧道，局域网外的设备凭长钥匙进。</div>'
-      if (warn) {
-        warn.className = 't-warn' + (t.error ? ' is-bad' : '')
-        warn.textContent = t.error ? (T_ERR[String(t.error)] || String(t.error)) : ''
-      }
-    }
-  }
-  function tunnelPoll() {
-    clearTimeout(T_POLL)
-    T_POLL = setTimeout(function () {
-      fetch(API + '/tunnel', { cache: 'no-store' })
+  function pollCaseOcr(folder, restore) {
+    var tries = 0
+    function loop() {
+      fetch(API + '/case/ocr/status?root=' + encodeURIComponent(state.root) + '&folder=' + encodeURIComponent(folder), { cache: 'no-store' })
         .then(function (r) { return r.json() })
-        .then(function (j) { if (j && j.ok) tunnelPaint(j.tunnel) })
-        .catch(function () {})
-    }, 1500)
+        .then(function (j) {
+          var st = (j && j.state) || 'idle'
+          if (st === 'running') {
+            var b = $('btn-ocr')
+            if (b) b.textContent = '识图 ' + (j.done || 0) + '/' + (j.total || 0)
+            // 全局 FIFO 闸：排在别人的大批抽取后面也正常，20 分钟起给个"后台仍在跑"的台阶
+            if (++tries > 1700) { restore('识图仍在后台跑'); return }
+            setTimeout(loop, 700)
+            return
+          }
+          var made = (j && j.made ? j.made.length : 0)
+          var failed = (j && j.failed) || []
+          var names = failed.slice(0, 3).join('、') + (failed.length > 3 ? ' 等' + failed.length + ' 份' : '')
+          if (st === 'error') {
+            restore()
+            toast('识图出错：' + ((j && j.error) || '未知') + (made ? '（已成 ' + made + ' 份）' : ''), 5600)
+          } else if (failed.length) {
+            restore()
+            toast('识图完成 ' + made + ' 份，失败 ' + failed.length + ' 份（' + names + '）', 5600)
+          } else if (st === 'done') {
+            restore()
+            toast('识图完成 ' + made + ' 份，失败 0 份', 4200)
+          } else {
+            restore()
+          }
+          // 体检/缺件/「抽出的文字」随这次重渲染自然刷新
+          loadCases(state.root, false).then(function () { select(folder) })
+        })
+        .catch(function () { if (++tries < 40) setTimeout(loop, 1500); else restore() })
+    }
+    loop()
   }
-  function loadTunnel() {
-    fetch(API + '/tunnel', { cache: 'no-store' })
+
+  // ---------- 全局导入进度条（缺陷1：页面关了再进来，找回还在跑的导入） ----------
+  // 宿主 IMPORT_JOBS 里任务照跑；这里只是把 UI 接回来。弹层开着时让位给弹层内的进度条。
+  var stripPoll = null
+  var stripHidden = false // 点 × 只收起本轮显示，不打断任务；下一次阶段变化会再亮
+  var stripHideKey = ''    // 点 × 那一刻的 phase|done：变了就说明任务往前走了，条子该重新出现
+  var STRIP_LAST = null    // 最近一次画上去的任务快照（× 时用来记 key）
+  var importStripActive = false
+  var ocrPollTimer = null
+  var ocrWasActive = false
+
+  function stripPhase(st) {
+    var ph = (st && st.phase) || ''
+    var name = ph === 'scan' ? '清点文件' : ph === 'text' ? '抽字' : ph === 'image' ? '抽字(OCR)' : ph === 'copy' ? '拷贝' : ph === 'write' ? '写档案' : '准备中'
+    var cnt = st && st.total ? ' ' + (st.done || 0) + '/' + st.total : ''
+    return name + cnt
+  }
+
+  function stripSheetOpen() {
+    var sheet = $('import-sheet')
+    return !!(sheet && !sheet.hidden)
+  }
+
+  function stripKeyOf(st) { return String((st && st.phase) || '') + '|' + String((st && st.done) || 0) }
+  // × 只隐藏到下一次 job 阶段变化：以前 stripHidden 一置真就「本轮再也不显示」，
+  // 用户关掉一次就彻底失去可见性。现在 phase/done 一变就重新亮。
+  function stripHiddenNow(st) {
+    if (stripSheetOpen()) return true
+    if (!stripHidden) return false
+    if (stripHideKey && stripKeyOf(st) !== stripHideKey) { stripHidden = false; stripHideKey = ''; return false }
+    return true
+  }
+
+  function setStripPct(pct) {
+    var p = $('imp-strip-pct')
+    if (!p) return
+    var v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)))
+    p.textContent = v + '%'
+  }
+
+  function paintStrip(st, folder, ocr) {
+    var el = $('imp-strip')
+    if (!el) return
+    STRIP_LAST = st || null
+    if (stripHiddenNow(st)) { el.hidden = true; return }
+    el.hidden = false
+    var bar = $('imp-strip-bar')
+    var pc = peekPct(st)
+    if (bar) bar.style.width = pc + '%'
+    setStripPct(pc)
+    var lb = $('imp-strip-text')
+    if (lb) {
+      var wait = ocr && ocr.queued > 0 ? ' · OCR排队 ' + ocr.queued : ''
+      lb.textContent = '正在导入：' + folder + ' · 阶段 ' + stripPhase(st) + wait + '（关掉不影响导入）'
+    }
+  }
+
+  function stopStrip() {
+    if (stripPoll) { clearTimeout(stripPoll); stripPoll = null }
+  }
+
+  function restoreImportStrip() {
+    fetch(API + '/import/status', { cache: 'no-store' })
       .then(function (r) { return r.json() })
       .then(function (j) {
-        if (j && j.ok) tunnelPaint(j.tunnel)
-        else if (j && j.error === 'tunnel-host-only') {
-          var box = $('t-urls')
-          if (box) box.innerHTML = '<div class="lan-none">公网房间只能在这台电脑上管理。</div>'
+        var st = (j && j.importing) || { state: 'idle' }
+        var folder = (j && j.job && j.job.folder) || ''
+        if (st.state === 'running') {
+          stripHidden = false
+          importStripActive = true
+          paintStrip(st, folder, j.ocr)
+          pollStrip()
+          return
+        }
+        if (st.state === 'done' || st.state === 'error') {
+          // 刚结束的（3 分钟窗口内）不打扰，只在 console 记一笔
+          console.log('[game-desk] 导入任务' + (st.state === 'done' ? '刚完成' : '出错收场') + '：' + folder)
         }
       })
       .catch(function () {})
   }
-  function tunnelSet(body, okMsg) {
-    fetch(API + '/tunnel', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body)
-    })
-      .then(function (r) { return r.json() })
-      .then(function (j) {
-        if (j && j.ok) { tunnelPaint(j.tunnel); if (okMsg) toast(okMsg) }
-        else toast('没改成：' + ((j && j.error) || '未知'))
-      })
-      .catch(function () { toast('隧道接口没应答') })
+
+  function pollStrip() {
+    stopStrip()
+    function loop() {
+      fetch(API + '/import/status', { cache: 'no-store' })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          var st = (j && j.importing) || { state: 'idle' }
+          var folder = (j && j.job && j.job.folder) || ''
+          if (st.state === 'running') {
+            importStripActive = true
+            paintStrip(st, folder, j.ocr)
+            stripPoll = setTimeout(loop, 800)
+            return
+          }
+          importStripActive = false
+          stopStrip()
+          var el = $('imp-strip')
+          if (el) el.hidden = true
+          if (st.state === 'done') {
+            if (stripSheetOpen()) return // 弹层开着：它的 pollImport 负责 toast 与刷新，别报两遍
+            var res = st.result || {}
+            importDoneToast(res.folder || folder, res.updated, res)
+            // 用服务端带回的任务 root（j.job.root），刷新完还留在导入时那个书库
+            loadCases((j.job && j.job.root) || state.root, false)
+          } else if (st.state === 'error') {
+            if (!stripSheetOpen()) toast('导入失败：' + errCn(st.error, '未知'), 5200)
+          }
+        })
+        .catch(function () { stripPoll = setTimeout(loop, 1600) })
+    }
+    stripPoll = setTimeout(loop, 800)
   }
 
+  // ---------- 后台解析条（OCR/抽取任务，复用同一条 #imp-strip） ----------
+  // 数据源 GET /api/ocr 的 jobs[]（EXTRACT_JOBS/IMPORT_JOBS 里 running 的）+ current[]（OCR 闸口台账）。
+  // 热重载会丢在途任务的可见性（子进程继续跑、结果仍进缓存），这里查不到就安静地不显示，不谎报。
+  function paintOcrStrip(snap) {
+    var el = $('imp-strip')
+    if (!el) return
+    var job = snap.jobs && snap.jobs.length ? snap.jobs[0] : null
+    var cur = snap.current && snap.current.length ? snap.current[0] : null
+    STRIP_LAST = job || null
+    // 没有在途 job、也没有 OCR 台账：后台其实什么都没跑。
+    // 以前这里照样把条子显示出来写「后台解析：OCR 0%」，看着像永远卡在 0。
+    if (!job && !OCR_SCAN.total && !cur) { el.hidden = true; return }
+    if (stripHiddenNow(job || {})) { el.hidden = true; return }
+    el.hidden = false
+    var bar = $('imp-strip-bar')
+    var pct = 0
+    var txt = '后台解析：'
+    if (job && job.total) {
+      // 抽字已到 total、OCR 批次还在收尾时（实测会出现 19/19 挂两分钟），给 99% 而不是死钉 95%
+      pct = (job.done >= job.total) ? 99 : Math.min(95, Math.round((job.done / job.total) * 100))
+      // 识图补齐的 job.folder 是 caseDir 全路径，条上只给末段；再标一下这是哪个功能
+      txt += (job.kind === 'case-ocr' ? '识图补齐 · ' : '') + baseName(job.folder || '') + ' · ' + stripPhase(job)
+    } else if (OCR_SCAN.total) {
+      // 同步抽取路径（POST /api/extract 不在 IMPORT_JOBS 里）没有单本 job：用整个书库的已扫/总量算百分比
+      pct = Math.max(1, Math.min(99, Math.round((OCR_SCAN.done / OCR_SCAN.total) * 100)))
+      txt += 'OCR · 书库已扫 ' + OCR_SCAN.done + '/' + OCR_SCAN.total
+    } else {
+      txt += 'OCR'
+    }
+    if (bar) bar.style.width = pct + '%'
+    setStripPct(pct)
+    var lb = $('imp-strip-text')
+    if (!lb) return
+    if (cur && cur.file) txt += '（当前 ' + baseName(cur.file) + '）'
+    if (snap.jobs && snap.jobs.length > 1) txt += ' 等' + snap.jobs.length + '本'
+    if (snap.queued > 0) txt += ' · OCR排队 ' + snap.queued
+    lb.textContent = txt + '（关掉不影响后台）'
+  }
+
+  var OCR_SCAN = { done: 0, total: 0, at: 0 }
+
+  function scanTotalsFrom(list) {
+    var d = 0
+    var t = 0
+    ;(list || []).forEach(function (c) {
+      if (!c || c.kind !== 'pack' || !c.scanned || !c.scanned.total) return
+      d += Number(c.scanned.done) || 0
+      t += Number(c.scanned.total) || 0
+    })
+    return { done: d, total: t, at: Date.now() }
+  }
+
+  // 书库扫描完成度：逐个 root 取 /api/cases（不带 root 只回 roots[0]，本子库里没有 pack）
+  function scanTotalsAll() {
+    var roots = (state.roots || []).slice()
+    if (!roots.length) return Promise.resolve({ done: 0, total: 0, at: Date.now() })
+    var done = 0
+    var total = 0
+    var chain = Promise.resolve()
+    roots.forEach(function (r) {
+      chain = chain.then(function () {
+        return fetch(API + '/cases?root=' + encodeURIComponent(r), { cache: 'no-store' })
+          .then(function (x) { return x.json() })
+          .then(function (cj) {
+            if (!cj || !cj.ok || !cj.cases) return
+            var sc = scanTotalsFrom(cj.cases)
+            done += sc.done
+            total += sc.total
+          })
+          .catch(function () {})
+      })
+    })
+    return chain.then(function () { return { done: done, total: total, at: Date.now() } })
+  }
+
+  function ocrPollTick() {
+    if (importStripActive || stripSheetOpen()) return // 导入条优先、弹层内进度优先
+    fetch(API + '/ocr', { cache: 'no-store' })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        var snap = (j && j.ocr) || {}
+        var active = (snap.jobs && snap.jobs.length) || snap.running > 0 || (snap.current && snap.current.length)
+        if (active) {
+          if (!ocrWasActive) { ocrWasActive = true; stripHidden = false } // 新一轮活动，× 的收起不跨轮
+          if ((snap.jobs && snap.jobs.length) || Date.now() - OCR_SCAN.at < 4000) {
+            paintOcrStrip(snap)
+            return
+          }
+          scanTotalsAll().then(function (sc) {
+            if (sc.total) OCR_SCAN = sc
+            paintOcrStrip(snap)
+          })
+        } else if (ocrWasActive) {
+          ocrWasActive = false
+          var el = $('imp-strip')
+          if (el) el.hidden = true
+          reloadListQuiet() // 后台抽完一轮：把新落的体检标签与排序捞回来（用户 m01363）
+        }
+      })
+      .catch(function () {})
+  }
+
+  function startOcrPoll() {
+    if (ocrPollTimer) return
+    ocrPollTimer = setInterval(ocrPollTick, 5000)
+  }
+
+  // ---------- 房间在场（任务4：心跳 + 在场条 + 强行开局）----------
+  var WHO = ''
+  try {
+    WHO = localStorage.getItem('gd-who') || ''
+    if (!WHO) { WHO = Math.random().toString(36).slice(2, 10) + Date.now().toString(36); localStorage.setItem('gd-who', WHO) }
+  } catch (e) { WHO = Math.random().toString(36).slice(2, 10) }
+  function roomExpect() {
+    if (panel !== 'jubensha' || !state.active) return 0
+    var n = (state.active.roles || []).length || Number(state.active.players) || 0
+    return Math.max(0, Math.min(8, n))
+  }
+
+  // ---------- 书库列表 / 档案页：UI 已搬进 ./lib/listview.js 与 ./lib/packdossier.js ----------
+  // 只搬不改：DOM（$）与书库状态（state）从 deps 注入，是这里同一个对象引用；LAST_REVIEW / GAPS_AUTO
+  // 仍在这里声明，模块通过 getter 拿到同一份引用（对象内写回照旧生效）。
+  // 下面是①工厂装配（依赖逐条显式列出）②同名薄委托 —— 页面里原来的调用点一行都不用改。
+  var pd = createPackDossier({
+    $: $,                        // 所有 DOM 查询都走它
+    API: API,                    // /file /text /reveal 等直拼 URL 的地方
+    state: state,                // 书库状态（同一个对象，读 root/cases/active）
+    toast: toast,                // 操作失败/成功的提示
+    select: select,              // 导入成本子后跳过去
+    loadCases: loadCases,        // 复核/补全/撤销之后重取标签
+    reloadListQuiet: reloadListQuiet,
+    tableSave: tableSave,        // 座位、跑团桌状态的落盘
+    openTable: openTable,
+    copyText: copyText,
+    pickSeat: pickSeat,
+    seatRowHtml: seatRowHtml,
+    paintSeatRow: paintSeatRow,
+    loadSeats: loadSeats,
+    tableMe: tableMe,
+    runCaseOcr: runCaseOcr,
+    pollImport: pollImport,
+    postJson: postJson,
+    setBtnBusy: setBtnBusy,
+    arcTag: arcTag,              // 内容卡右上角的「已读 N 字」标签
+    getLastReview: function () { return LAST_REVIEW },
+    getGapsAuto: function () { return GAPS_AUTO }
+  })
+  // 体检结论文案表（ready/partial/blocked）在模块里那份是唯一来源：导入预览 renderPeekPack 还要用，取回来。
+  var VERDICT = pd.VERDICT
+  var lv = createListview({
+    $: $,
+    API: API,
+    state: state,
+    doc: document,               // ensurePackCss 要插 <style>，走注入的 document
+    toast: toast,
+    select: select,
+    tableSave: tableSave,
+    reloadListQuiet: reloadListQuiet,
+    refreshActiveScreen: refreshActiveScreen   // 重算标签后把档案页的体检块拉新
+  })
+
+  function renderChips() { return lv.renderChips() }
+  function renderList() { return lv.render() }
+  function ensurePackTools() { return lv.ensurePackTools() }
+  function caseMetaOf(c) { return pd.caseMetaOf(c) }
+  function renderCase(c) { return pd.renderCase(c) }
+  function renderPack(c) { return pd.renderPack(c) }
+  function refreshActiveScreen() { return pd.refreshActiveScreen() }
+  function runPackReview(folder, btn) { return pd.runPackReview(folder, btn) }
+  function packRecompute(folder, btn) { return pd.packRecompute(folder, btn) }
+  function packFill(folder, btn, oneKey) { return pd.packFill(folder, btn, oneKey) }
+  function packUndo(folder, key, label, btn) { return pd.packUndo(folder, key, label, btn) }
+  function runPackPlaytest(folder, btn, force) { return pd.runPackPlaytest(folder, btn, force) }
+  function gotoAiFill() { return pd.gotoAiFill() }
+  function contentCard(it) { return pd.contentCard(it) }
+  function preview(c, rel, kind) { return pd.preview(c, rel, kind) }
+  function previewUrl(url, name, isImage, text) { return pd.previewUrl(url, name, isImage, text) }
+  function closeViewer() { return pd.closeViewer() }
+  function reveal(path) { return pd.reveal(path) }
+
+
+  // ---------- 房间条 / 房间设置：整套 UI 已搬进 ./lib/roombar.js（依赖注入工厂）----------
+  // 这里只剩两件事：① 工厂装配（依赖一条条显式列出，为什么需要写在后面对应的行上）
+  // ② 同名薄委托 —— 页面里原来那些调用点（roombarPaint / roomPaint / loadLan / lanSet /
+  //    loadTunnel / tunnelSet）一行都不用改。
+  // 留在 app.js 的是页面域与后端域：昵称读写（localStorage）、席位认领、心跳 roomBeat、/room 拉取、
+  // 本子选择（select / loadCases / caseMetaOf）、远程开关（loadRemote）。
+  var rb = createRoombar({
+    $: $,                        // 所有 DOM 查询都走它，模块里不出现 document
+    api: api,                    // 所有请求都走它，URL 前缀 API 不外泄
+    toast: toast,                // 复制成功/失败、开房失败这些提示
+    state: state,                // 只读：state.active（本机兜底那本）/ state.cases（「看这本」够不够得着）
+    select: select,              // 「看这本」：本子已在书库里就直接选中
+    loadCases: loadCases,        // 「看这本」：不在已载列表里时补拉一次再选
+    caseMetaOf: caseMetaOf,      // 服务端还没解析 caseFolder 时，用本机这条的要素兜底
+    nick: nick,                  // 昵称按钮显示的当前名（localStorage 在 app.js 里）
+    setNick: setNick,            // 保存昵称（localStorage 写回，只在 app.js 里做）
+    seatWho: seatWho,            // 在场名册里标「我」用的是同一台机器的 who
+    copyText: copyText,          // 「房间链接」与弹层里的复制按钮
+    setBtnBusy: setBtnBusy,      // 开房/关房按钮的忙态
+    loadRoomBar: loadRoomBar,    // 隧道起来/关房后要重拉一次 /room
+    loadRemote: loadRemote,      // 「房间设置」弹层打开时顺带拉远程开关
+    reClaimMySeat: reClaimMySeat, // 改完昵称要让服务端席位名跟着变（席位域留在 app.js）
+  })
+
+  // 薄委托：调用点保持原名原签名（搬走后页面里 0 处调用点需要改）
+  function roombarPaint(r, via, force) { return rb.paint(r, via, force) }
+  function roomPaint(r) { return rb.roomPaint(r) }
+  function loadLan() { return rb.loadLan() }
+  function lanSet(body, okMsg) { return rb.lanSet(body, okMsg) }
+  function loadTunnel() { return rb.loadTunnel() }
+  function tunnelSet(body, okMsg, done) { return rb.tunnelSet(body, okMsg, done) }
+
+  // 昵称改了要让服务端记的席位名字跟着变：这一本已经选了席，就再认领一次
+  function reClaimMySeat() {
+    var c = state.active
+    if (!c) return
+    var idx = mySeatOf(c)
+    if (!(idx >= 0)) return
+    postClaim(c, idx, nick(), function (j) {
+      if (j && j.ok === true) {
+        SEAT_MAP[seatKeyOf(c)] = j.seats || []
+        paintSeatRow(c)
+      }
+    })
+  }
+
+  function loadRoomBar() {
+    // 一进来先把这条画出来（r=null → 「还没开房」/「现在没有开着的房间」），不等 /room 回包：
+    // 用户 2026-11-19「没有看到房间」—— 房间条一旦藏着，人既不知道房间在哪也不知道下一步点哪；
+    // 服务端一答话，下面的 roombarPaint 立刻按真快照覆盖。
+    var cur = rb.current()
+    if (!cur.last) roombarPaint(null, cur.via, true)
+    api('/room', { cache: 'no-store' })
+      .then(function (r) { return r.json() })
+      .then(function (j) {
+        // 编辑昵称时这一支也要穿透「编辑中不重画」的守卫（第三参 = 编辑中），否则输入框被冲掉
+        if (j && j.ok) roombarPaint(j.room, j.room && j.room.you && j.room.you.via, rb.nickEditing())
+      })
+      .catch(function () {})
+  }
+
+  // 是不是 DSH 窗口里的嵌入页（页面 URL 带 ?panel=…）：只有嵌入页能接管房主，心跳把这个标记报给服务端，
+  // 服务端据此判「谁该被点名为房主」——选了某一本（caseFolder）不再参与抢房主。
+  // 每次现算，不用文件顶部那个 URLSearchParams 快照（页面内换 panel 也能跟上）。
+  function embedFlag() { return (typeof location !== 'undefined' && /[?&]panel=/.test(location.search)) ? 1 : 0 }
+  function roomBeat(extra) {
+    var body = { room: panel, who: WHO, name: nick(), expect: roomExpect(), embed: embedFlag() }
+    if (state.active && state.root) { body.caseFolder = state.active.folder; body.caseRoot = state.root }
+    if (extra) { for (var k in extra) body[k] = extra[k] }
+    try {
+      fetch(API + '/room/beat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        .then(function (r) { return r.json() })
+        .then(function (j) {
+          if (!j || !j.ok) return
+          roombarPaint(j.room, j.room && j.room.you && j.room.you.via)
+          var sheet = $('lan-sheet')
+          if (sheet && !sheet.hidden) roomPaint(j.room)
+        })
+        .catch(function () {})
+    } catch (e) { /* 心跳打不出去不碍事，下一轮再补 */ }
+  }
+  setInterval(roomBeat, 15000)
+  setTimeout(roomBeat, 1200)
+  window.addEventListener('beforeunload', function () {
+    try {
+      // 带上当前这本：服务端只清这一本的席位（不带的话老逻辑会清掉这个人在别的书里的座位）
+   navigator.sendBeacon(API + '/room/beat', new Blob([JSON.stringify({ room: panel, who: WHO, bye: 1, embed: embedFlag(), caseRoot: state.root || '', caseFolder: (state.active && state.active.folder) || '' })], { type: 'application/json' }))
+    } catch (e) { /* 发不掉也没关系，服务端 60 秒窗口会兜住 */ }
+  })
 
   // ---------- 装配 ----------
   function setRoom(p) {
@@ -1548,11 +1897,14 @@
     $('btn-new').hidden = arcade
     $('btn-import-case').hidden = arcade
     $('btn-import-arcade').hidden = !arcade
+    var pmb = $('btn-packmeta')
+    if (pmb) pmb.hidden = arcade // 标签只在剧本杀（资料夹区）语义下有意义
     if (arcade) { loadCatalog() } else if (!CASES_LOADED) {
       CASES_LOADED = true
       loadCases('', false)
     }
   }
+  ensurePackTools()
   var CASES_LOADED = panel !== 'arcade'
   setRoom(panel)
   if (panel !== 'arcade') {
@@ -1562,6 +1914,10 @@
       if (deepCase && state.cases.some(function (c) { return c.folder === deepCase })) select(deepCase)
     })
   }
+  restoreImportStrip()
+  startOcrPoll()
+  loadRoomBar()
+  startSeatPoll()
 
   $('lib').addEventListener('change', function (e) {
     state.active = null
@@ -1598,12 +1954,41 @@
   $('btn-import-arcade').addEventListener('click', openArcadeImport)
   $('arcade-cancel').addEventListener('click', closeArcadeImport)
   $('arcade-scan').addEventListener('click', arcadeScan)
+  $('a-hand-save').addEventListener('click', arcadeHandSave)
+  Array.prototype.forEach.call(document.querySelectorAll('#arcade-sheet .arcade-tab'), function (el) {
+    el.addEventListener('click', function () { arcadeTab(el.getAttribute('data-atab')) })
+  })
   $('arcade-sheet').addEventListener('click', function (e) { if (e.target === $('arcade-sheet')) closeArcadeImport() })
+  // 某一档的「更多」弹层：点背板收起；行内按钮先拦（拆分 / 移除），剩下的点行就开材料局
+  $('arc-more').addEventListener('click', function (e) { if (e.target === $('arc-more')) closeArcMore() })
+  $('arc-more-close').addEventListener('click', function () { closeArcMore() })
+  $('arc-more-rand').addEventListener('click', function () { var s = ARC_MORE; closeArcMore(); arcadeRandom(s) })
+  $('arc-more-imp').addEventListener('click', function () { var s = ARC_MORE; closeArcMore(); openArcadeImport(s) })
+  $('arc-more-list').addEventListener('click', function (e) {
+    var kill = e.target.closest ? e.target.closest('[data-amkill]') : null
+    if (kill) { e.stopPropagation(); deleteArcade(kill.getAttribute('data-amkill')); return }
+    var sp = e.target.closest ? e.target.closest('[data-amsplit]') : null
+    if (sp) { e.stopPropagation(); arcadeSplit(sp.getAttribute('data-amsplit'), sp); return }
+    var row = e.target.closest ? e.target.closest('[data-open]') : null
+    if (!row) return
+    var f = row.getAttribute('data-open')
+    var it = (ARC_ITEMS || []).filter(function (x) { return x.folder === f })[0]
+    if (it && window.GameRoom) { it.root = state.root; closeArcMore(); window.GameRoom.open(it) }
+    else if (it) toast('房间脚本没加载')
+  })
   $('a-path').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); arcadeScan() } })
   $('r-mode').addEventListener('change', function () { remoteSave() })
   $('r-daily').addEventListener('change', function () { remoteSave() })
   $('modes').addEventListener('click', function (e) {
     var t = e.target
+    // 玩法卡右上角的「＋导入」：只开弹层并预选该玩法，不启动游戏，所以先拦在这里
+    // 玩法卡右下角的「更多 N」：这一档的内容全在弹层里列出来（不铺网格），顺手给随机 / 再加一份
+    var more = t.closest ? t.closest('.mode-more') : null
+    if (more) { e.stopPropagation(); openArcMore(more.getAttribute('data-more')); return }
+    var imp = t.closest ? t.closest('.mode-imp') : null
+    if (imp) { e.stopPropagation(); openArcadeImport(imp.getAttribute('data-imp')); return }
+    var sp = t.closest ? t.closest('.ar-split') : null
+    if (sp) { e.stopPropagation(); arcadeSplit(sp.getAttribute('data-split'), sp); return }
     var kill = t.closest ? t.closest('.ar-kill') : null
     if (kill) { e.stopPropagation(); deleteArcade(kill.getAttribute('data-kill')); return }
     var add = t.closest ? t.closest('.is-add') : null
@@ -1612,13 +1997,16 @@
     if (card) {
       var f = card.getAttribute('data-folder')
       var it = (ARC_ITEMS || []).filter(function (x) { return x.folder === f })[0]
-      if (it && window.GameRoom) window.GameRoom.open(it)
+      // 把 root 一起交给房间：材料局存档按 root|folder 建键（room.js 读取 ENTRY.root，可能为空串）
+      if (it && window.GameRoom) { it.root = state.root; window.GameRoom.open(it) }
       else if (it) toast('房间脚本没加载')
     }
   })
   $('match-close').addEventListener('click', function () { $('match').hidden = true })
   $('match').addEventListener('click', function (e) { if (e.target === $('match')) $('match').hidden = true })
   window.addEventListener('message', function (ev) {
+    // 只收同源回执：本文件自己发消息用的就是 location.origin，别让别的窗口/框架塞一条假「filled」进来
+    if (ev.origin !== location.origin) return
     var d = ev.data
     if (!d || d.source !== 'dsh-game-desk' || d.type !== 'filled') return
     if (PENDING_FILL) {
@@ -1632,14 +2020,25 @@
   $('sheet').addEventListener('click', function (e) { if (e.target === $('sheet')) closeSheet() })
   $('viewer-close').addEventListener('click', closeViewer)
   $('viewer').addEventListener('click', function (e) { if (e.target === $('viewer')) closeViewer() })
-  $('q').addEventListener('input', function (e) { state.q = e.target.value; renderList() })
-  Array.prototype.forEach.call($('chips').querySelectorAll('.chip'), function (el) {
-    el.addEventListener('click', function () {
-      Array.prototype.forEach.call($('chips').querySelectorAll('.chip'), function (x) { x.classList.remove('is-on') })
-      el.classList.add('is-on')
-      state.filter = el.getAttribute('data-filter')
-      renderList()
-    })
+  // 每个键都同步重建列表 = 打字时列表在抖、滚动位置归零；压 120ms 去抖，停下来再画
+  $('q').addEventListener('input', function (e) {
+    state.q = e.target.value
+    if (listDebounce) clearTimeout(listDebounce)
+    listDebounce = setTimeout(function () { listDebounce = 0; renderList() }, 120)
+  })
+  // chips 是动态生成的，绑定必须走 #chips 容器委托（逐个绑会漏掉后加的）
+  $('chips').addEventListener('click', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('.chip') : null
+    if (!el) return
+    state.filter = el.getAttribute('data-filter')
+    Array.prototype.forEach.call($('chips').querySelectorAll('.chip'), function (x) { x.classList.toggle('is-on', x === el) })
+    renderList()
+  })
+  $('imp-strip-x').addEventListener('click', function () {
+    // 记住点下去那一刻的阶段：任务往下走一步（phase/done 变）条子会自己回来
+    stripHideKey = stripKeyOf(STRIP_LAST)
+    stripHidden = true
+    $('imp-strip').hidden = true
   })
   // 对局室要用的几件东西（table.js 通过它回话）
   function gotoRoom(p) {
@@ -1659,8 +2058,18 @@
     toast: toast
   }
 
+  // 编辑态（输入框/文本域/下拉/可编辑区）不接管按键：否则在导入路径、笔记、提问框里打「/」
+  // 会被全局搜索快捷键吞掉、焦点被抢到左侧搜索框。
+  function isEditing(el) {
+    if (!el) return false
+    var tag = String(el.tagName || '').toUpperCase()
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true
+  }
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closeSheet(); closeImport(); closeViewer(); closeArcadeImport(); $('lan-sheet').hidden = true; $('match').hidden = true; if (window.GameTable) window.GameTable.close(); if (window.GameRoom) window.GameRoom.close() }
-    if (e.key === '/' && document.activeElement !== $('q')) { e.preventDefault(); $('q').focus() }
+    var editing = isEditing(e.target || document.activeElement)
+    // 编辑态一律让路（Esc 例外：它只关弹层、不吞输入，输入框里按 Esc 关层是既有行为，别顺手改掉）
+    if (editing && e.key !== 'Escape') return
+    if (e.key === 'Escape') { closeSheet(); closeImport(); closeViewer(); closeArcadeImport(); closeArcMore(); $('lan-sheet').hidden = true; $('match').hidden = true; if (window.GameTable) window.GameTable.close(); if (window.GameRoom) window.GameRoom.close(); return }
+    if (e.key === '/') { e.preventDefault(); $('q').focus() }
   })
 })()

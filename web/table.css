@@ -31,18 +31,23 @@
 .tbl-seats { min-width: 0; }
 .tbl-k2 { font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
 .seatbtn {
-  display: block; width: 100%; text-align: left; padding: 9px 10px; margin-bottom: 6px;
+  display: block; width: 100%; min-width: 0; text-align: left; padding: 9px 10px; margin-bottom: 6px;
   border: 1px solid var(--rule-soft); border-radius: 2px; background: var(--paper-2);
   transition: border-color .14s ease, background .14s ease;
+  overflow-wrap: anywhere;   /* 长角色名 / 「某某选了这一席」在 390px 窄屏里换行，不把卡片撑出格 */
 }
 .seatbtn:hover { border-color: var(--ink-2); }
 .seatbtn.is-mine{border-left:2px solid var(--stamp)}
-.seat-mine{display:block;margin-top:6px;font:inherit;font-size:9.5px;letter-spacing:.06em;color:var(--muted);background:none;border:0;padding:0;cursor:pointer;text-align:left}
+.seat-mine{display:block;margin-top:6px;font:inherit;font-size:9.5px;letter-spacing:.06em;color:var(--muted);background:none;border:0;padding:0;cursor:pointer;text-align:left;white-space:normal;overflow-wrap:anywhere;min-height:15px}
 .seat-mine:hover{color:var(--stamp)}
 .seatbtn.is-mine .seat-mine{color:var(--stamp)}
+/* 别人占了这一席：整张卡与卡里的按钮都不可点（.seatbtn.is-taken 的变淡在 style.css 里） */
+.seatbtn.is-taken .seat-mine,
+.seatbtn.is-taken .seat-mine:disabled{cursor:not-allowed;color:var(--muted)}
+.seatbtn.is-taken:hover { border-color: var(--rule-soft); }
 .tbl-tiphint{margin:0 0 8px;font-size:9.5px;line-height:1.6;color:var(--muted)}
 .seatbtn.is-on { border-color: var(--stamp); background: var(--paper-3); }
-.seatbtn b { display: block; font-family: var(--serif); font-size: 13.5px; font-weight: 600; }
+.seatbtn b { display: block; font-family: var(--serif); font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
 .seatbtn em { display: block; margin-top: 2px; font-family: var(--mono); font-size: 9px; letter-spacing: .08em; color: var(--muted); font-style: normal; }
 
 /* 主区 */
@@ -126,8 +131,9 @@
   .tbl-act { font-size: 9.5px; padding: 0 2px; }
   .tbl-clock { font-size: 10.5px; padding: 3px 6px; }
   .tbl-grid { padding-top: 14px; gap: 16px; }
-  .tbl-seats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .seatbtn { padding: 9px 10px; margin-bottom: 0; }
+  /* minmax(0,1fr)：两列都允许被内容压缩，否则长名字会把网格撑得比屏幕还宽（390px 溢出） */
+  .tbl-seats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .seatbtn { padding: 9px 10px; margin-bottom: 0; min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
   .tbl-tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
   .tbl-tab { white-space: nowrap; padding: 9px 12px; }
   .read { font-size: 13.5px; line-height: 1.9; }
@@ -143,6 +149,124 @@
   .chat-input textarea { font-size: 16px; }
 }
 
+/* ---------- 白板：自由画板 + 思维导图（2026-11-20，m01037 / m01053） ---------- */
+.wb-tools { display: flex; flex-wrap: wrap; gap: 5px 6px; align-items: center; margin: 2px 0 10px; }
+.wb-grp { display: inline-flex; gap: 4px; align-items: center; }
+.wb-tools .is-on { border-color: var(--ink-2); background: var(--paper-3); color: var(--ink); }
+.wb-swatch { width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid rgba(0, 0, 0, .2); cursor: pointer; }
+.wb-swatch.is-on { box-shadow: 0 0 0 2px var(--paper), 0 0 0 3px var(--stamp); }
+.wb-swatch-sq { border-radius: 2px; border-color: rgba(0, 0, 0, .16); }
+.wb-w { min-width: 30px; }
+
+/* ---------- 白板画布：像 Obsidian Canvas 那样可以拖、可以缩放（2026-11-21） ----------
+   外层 .wb 是取景框，里层 .wb-world 是固定 2400×1500 的世界；
+   平移缩放只改 world 的 transform，卡片和笔画都在世界里，指针坐标按 world 的屏幕矩形换算。 */
+.wb {
+  position: relative; aspect-ratio: 16 / 10; min-height: 320px;
+  background: var(--paper-2);
+  background-image: radial-gradient(color-mix(in srgb, var(--ink) 16%, transparent) 1px, transparent 1.2px);
+  background-size: 22px 22px;
+  border: 1px solid var(--rule); border-radius: 2px;
+  overflow: hidden; touch-action: none; cursor: default;
+}
+.wb[data-mode="map"] { cursor: grab; }
+.wb[data-mode="map"]:active { cursor: grabbing; }
+.wb[data-pan="1"] { cursor: grab; }
+.wb[data-pan="1"]:active, .wb.is-drag { cursor: grabbing; }
+.wb-world { position: absolute; left: 0; top: 0; width: 2400px; height: 1500px; transform-origin: 0 0; will-change: transform; }
+.wb-cv { position: absolute; left: 0; top: 0; display: block; cursor: crosshair; }
+.wb[data-mode="map"] .wb-cv, .wb[data-pan="1"] .wb-cv { cursor: inherit; }
+.wb-nodes { position: absolute; inset: 0; pointer-events: none; }
+
+.wb-node {
+  position: absolute; pointer-events: auto; box-sizing: border-box;
+  padding: 11px 13px; border: 1px solid var(--rule); border-radius: 4px;
+  background: color-mix(in srgb, var(--paper) 96%, transparent);
+  font-family: var(--serif); font-size: 14px; line-height: 1.58; color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
+  cursor: move;
+}
+.wb[data-mode="draw"] .wb-node { pointer-events: none; }
+.wb[data-mode="draw"][data-pan="1"] .wb-node { pointer-events: auto; }
+.wb-node.k-red { background: #f3d9d4; border-color: #c98b7f; }
+.wb-node.k-orange { background: #f5e5cf; border-color: #c9a273; }
+.wb-node.k-yellow { background: #f3eece; border-color: #c2b06a; }
+.wb-node.k-green { background: #dce9da; border-color: #8aa886; }
+.wb-node.k-cyan { background: #d6e7e9; border-color: #7ea4a8; }
+.wb-node.k-purple { background: #e5dcee; border-color: #9d8cb4; }
+.wb-node:hover { box-shadow: 0 2px 10px rgba(0, 0, 0, .12); border-color: color-mix(in srgb, var(--stamp) 45%, var(--rule)); }
+.wb-node.is-sel { box-shadow: 0 0 0 1.5px var(--stamp), 0 2px 10px rgba(0, 0, 0, .1); border-color: var(--stamp); }
+.wb-node.is-from { border-style: dashed; border-color: var(--gold); }
+.wb-node.is-drop { box-shadow: 0 0 0 3px color-mix(in srgb, var(--stamp) 30%, transparent); border-color: var(--stamp); }
+.wb-node-t { display: block; height: 100%; overflow: auto; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; user-select: none; }
+.wb-node-t[contenteditable="true"] { cursor: text; user-select: text; }
+
+.wb-hdl {
+  position: absolute; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--paper); border: 1px solid color-mix(in srgb, var(--stamp) 70%, transparent);
+  opacity: 0; transition: opacity .12s ease, transform .12s ease;
+  cursor: crosshair; touch-action: none; z-index: 3;
+}
+.wb-node:hover .wb-hdl, .wb-node.is-sel .wb-hdl, .wb-node.is-from .wb-hdl { opacity: 1; }
+.wb-hdl:hover { background: var(--stamp); transform: scale(1.25); }
+.wb-hdl[data-side="n"] { top: -6px; left: 50%; margin-left: -5.5px; }
+.wb-hdl[data-side="s"] { bottom: -6px; left: 50%; margin-left: -5.5px; }
+.wb-hdl[data-side="w"] { left: -6px; top: 50%; margin-top: -5.5px; }
+.wb-hdl[data-side="e"] { right: -6px; top: 50%; margin-top: -5.5px; }
+
+.wb-rz {
+  position: absolute; right: 0; bottom: 0; width: 14px; height: 14px;
+  cursor: nwse-resize; opacity: 0; z-index: 3;
+  background: linear-gradient(135deg, transparent 46%, color-mix(in srgb, var(--ink) 40%, transparent) 46% 54%, transparent 54%);
+}
+.wb-node:hover .wb-rz, .wb-node.is-sel .wb-rz { opacity: 1; }
+
+.wb-zoom {
+  position: absolute; left: 10px; bottom: 10px; z-index: 6;
+  display: flex; align-items: center; gap: 2px; padding: 3px;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  border: 1px solid var(--rule-soft); border-radius: 3px;
+}
+.wb-zoom button {
+  min-width: 24px; padding: 2px 6px; border: 0; border-radius: 2px; background: none;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; color: var(--ink-2); cursor: pointer;
+}
+.wb-zoom button:hover { background: var(--paper-3); color: var(--ink); }
+.wb-hint { margin-top: 8px; }
+
+/* 白板 / 表格页签：整页放宽，画板高度铺到窗口底部（白板要大，不然卡片字都看不清）。 */
+.tbl-page.is-wide { max-width: 1760px; }
+.tbl-page.is-wide .tbl-grid { grid-template-columns: 180px minmax(0, 1fr) 250px; }
+.tbl-page.is-wide .wb { aspect-ratio: auto; height: min(calc(100vh - 248px), 820px); min-height: 460px; }
+@media (max-width: 760px) {
+  .tbl-page.is-wide .tbl-grid { grid-template-columns: minmax(0, 1fr); }
+  .tbl-page.is-wide .wb { height: 58vh; min-height: 340px; }
+}
+
+/* ---------- 表格：玩家自己建的格子（2026-11-20，m01037） ---------- */
+.gd-tools { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 2px 0 12px; }
+.gd-tip { font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; color: var(--muted); }
+.gd-grid { margin-bottom: 16px; border: 1px solid var(--rule-soft); border-radius: 2px; background: var(--paper-2); }
+.gd-grid-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--rule-soft); }
+.gd-grid-title { flex: 1; min-width: 0; padding: 2px 0; font-family: var(--serif); font-size: 13.5px; font-weight: 600; color: var(--ink); background: none; border: 0; }
+.gd-grid-title:focus { outline: none; border-bottom: 1px solid var(--ink-2); }
+.gd-x { padding: 2px 4px; font: inherit; font-size: 10.5px; color: var(--muted); background: none; border: 0; cursor: pointer; }
+.gd-x:hover { color: var(--stamp); }
+.gd-scroll { overflow-x: auto; }
+.gd-grid table { width: 100%; min-width: 420px; border-collapse: collapse; }
+.gd-grid th, .gd-grid td { border: 1px solid var(--rule-soft); vertical-align: top; }
+.gd-grid th { background: var(--paper-3); }
+.gd-th { display: block; padding: 7px 9px; font-family: var(--mono); font-size: 10px; letter-spacing: .08em; color: var(--ink-2); outline: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gd-grid td { min-width: 88px; padding: 7px 9px; font-family: var(--serif); font-size: 12.5px; line-height: 1.6; color: var(--ink); outline: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gd-th:focus, .gd-grid td:focus { background: var(--paper); box-shadow: inset 0 0 0 1px var(--ink-2); }
+.gd-addth, .gd-xcell { width: 1%; white-space: nowrap; border: 0 !important; background: none !important; }
+.gd-grid-foot { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-top: 1px solid var(--rule-soft); }
+@media (max-width: 680px) {
+  .wb { aspect-ratio: 4 / 3; }
+  .wb-tools { gap: 5px 6px; }
+  .gd-grid td, .gd-th { font-size: 12px; padding: 6px 7px; }
+}
+
 /* 剧透保护 · 玩家视角 */
 .lockcard { border: 1px solid var(--rule); border-left: 3px solid var(--gold); background: var(--paper-2); padding: 22px 24px; margin: 10px 0 26px; max-width: 640px }
 .lock-k { font-family: var(--mono); font-size: 10px; letter-spacing: .18em; color: var(--gold); margin-bottom: 12px }
@@ -150,3 +274,35 @@
 .lock-act { display: flex; align-items: center; gap: 12px; flex-wrap: wrap }
 .lock-hint { font-size: 11px; color: var(--muted) }
 #tbl-mode.is-host { border-color: var(--gold); color: var(--gold) }
+
+/* ---------- 人物剧本按幕给图 + 带本流程（2026-11-20，用户 m00504 / m00610） ----------
+   剧本页是 130dpi 的 JPEG（一页约 300KB），竖排一列、按页给序号；
+   流程是主持人的底稿，当前这一幕用左描边 + 「当前这一幕」标出来。 */
+.actdoc-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding-bottom: 8px; margin: 4px 0 10px; border-bottom: 1px solid var(--rule-soft) }
+.actdoc-k { font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--stamp) }
+.actdoc-head b { font-family: var(--serif); font-size: 16px; font-weight: 600 }
+.actdoc-m { margin-left: auto; font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; color: var(--muted) }
+.pg { margin: 0 0 14px }
+.pg img { width: 100%; border: 1px solid var(--rule); border-radius: 2px; background: #fff }
+.pg figcaption { font-family: var(--mono); font-size: 9px; letter-spacing: .1em; color: var(--muted); margin-top: 5px }
+.flow-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid var(--rule-soft); margin: 4px 0 10px }
+.flow-head b { font-family: var(--serif); font-size: 16px; font-weight: 600 }
+.flow-meta { font-family: var(--mono); font-size: 9px; letter-spacing: .06em; color: var(--muted) }
+.flow-stale { font-family: var(--mono); font-size: 9px; color: var(--stamp); border: 1px dashed var(--stamp); border-radius: 2px; padding: 1px 5px }
+.flow-card { border: 1px solid var(--rule-soft); border-left: 2px solid var(--rule); padding: 12px 14px; margin: 0 0 10px; background: var(--paper-2) }
+.flow-card.is-now { border-left-color: var(--stamp); background: var(--paper-3) }
+.flow-final { border-left-color: var(--gold) }
+.flow-notes { border-left-color: var(--muted) }
+.flow-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px }
+.flow-h b { font-family: var(--serif); font-size: 14px; font-weight: 600 }
+.flow-n { font-family: var(--mono); font-size: 9px; letter-spacing: .1em; color: var(--muted) }
+.flow-now { font-family: var(--mono); font-size: 9px; letter-spacing: .06em; color: var(--stamp); margin-left: auto }
+.flow-row { display: flex; gap: 10px; margin: 0 0 6px; font-size: 13px; line-height: 1.75 }
+.flow-k { flex: 0 0 92px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; color: var(--muted); padding-top: 3px }
+.flow-v { flex: 1; min-width: 0; font-family: var(--serif); color: var(--ink) }
+.flow-steps { margin: 0 0 8px 0; padding-left: 18px; font-family: var(--serif); font-size: 13px; line-height: 1.85; color: var(--ink) }
+.flow-empty { max-width: 680px }
+.flow-p { font-family: var(--serif); font-size: 13px; line-height: 1.9; color: var(--ink-2); margin: 0 0 12px }
+.flow-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 10px }
+.flow-note { font-family: var(--mono); font-size: 9.5px; color: var(--muted) }
+

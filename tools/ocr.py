@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 """ocr.py — 本地 OCR：把扫描件 PDF / 图片读成文字（案卷台 dsh-game-desk 用）。
 
-两条引擎：
-  rapid  RapidOCR（rapidocr_onnxruntime，ONNX Runtime CPU）——快、不占显存，默认。
-  vl     Qwen3-VL-2B-Instruct + transformers——慢、吃显存/内存，用来啃版式怪的页。
+三条引擎：
+  rapid       RapidOCR（rapidocr_onnxruntime，ONNX Runtime CPU）——快、不占显存，默认。
+  rapid-cuda  RapidOCR 走 ONNX Runtime 的 CUDAExecutionProvider（跑在 gsv-venv，复用 torch 的 cuDNN9 DLL）——
+              同模型同后处理，只把推理搬到 GPU；CUDA 不可用时自动回落 CPU 并在 stderr 说明。
+  vl          Qwen3-VL-2B-Instruct + transformers——慢、吃显存/内存，用来啃版式怪的页。
 
 用法：
-  python ocr.py --engine rapid --in <文件或目录> [--out <目录>] [--json]
-  python ocr.py --engine vl    --in <文件> --max-pages 2 [--out 目录]
+  python ocr.py --engine rapid      --in <文件或目录> [--out <目录>] [--json]
+  python ocr.py --engine rapid-cuda --in <a.pdf> <b.pdf> <c目录> [--json]   # --in 可给多个路径，模型只加载一次
+  python ocr.py --engine vl         --in <文件> --max-pages 2 [--out 目录]
 
 输入：.pdf（PyMuPDF 按 200 DPI 逐页渲染）、.jpg/.jpeg/.png/.webp/.bmp/.tif。
 输出：默认把每页文字拼好打印到 stdout；--out 时每个输入写 <名字>.txt；--json 每行一个对象
@@ -42,6 +45,7 @@ PDF_EXTS = {".pdf"}
 
 # 解释器候选。环境变量优先，方便换机器/换环境时覆盖。
 RAPID_MODULES = ("pymupdf", "rapidocr_onnxruntime")
+RAPID_CUDA_MODULES = ("onnxruntime", "rapidocr_onnxruntime", "cv2", "numpy", "PIL")
 VL_MODULES = ("torch", "transformers", "PIL")
 RENDER_MODULES = ("pymupdf",)
 
@@ -49,6 +53,11 @@ RAPID_PYTHONS = [
     os.environ.get("OCR_PYTHON_RAPID", ""),
     "C:/Users/OMEN/.dsh/tools/ocr-venv/Scripts/python.exe",
     "C:/Users/OMEN/.dsh/tools/whisper-venv/Scripts/python.exe",
+]
+# rapid-cuda 跑在 gsv-venv：那里有 onnxruntime-gpu + torch 的 cuDNN9 DLL，复用之。
+RAPID_CUDA_PYTHONS = [
+    os.environ.get("OCR_PYTHON_RAPID_CUDA", ""),
+    "C:/Users/OMEN/.dsh/tools/gsv-venv/Scripts/python.exe",
 ]
 VL_PYTHONS = [
     os.environ.get("OCR_PYTHON_VL", ""),
@@ -59,6 +68,15 @@ RENDER_PYTHONS = [
     "C:/Users/OMEN/.dsh/tools/ocr-venv/Scripts/python.exe",
     "C:/Users/OMEN/.dsh/tools/whisper-venv/Scripts/python.exe",
 ]
+
+
+def _engine_env(engine: str) -> tuple[list[str], tuple[str, ...]]:
+    if engine == "rapid-cuda":
+        return RAPID_CUDA_PYTHONS, RAPID_CUDA_MODULES
+    if engine == "vl":
+        return VL_PYTHONS, VL_MODULES
+    return RAPID_PYTHONS, RAPID_MODULES
+
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -98,8 +116,7 @@ def _has_modules(py: str, modules: tuple[str, ...]) -> bool:
 
 
 def _pick_python(engine: str) -> str | None:
-    candidates = RAPID_PYTHONS if engine == "rapid" else VL_PYTHONS
-    modules = RAPID_MODULES if engine == "rapid" else VL_MODULES
+    candidates, modules = _engine_env(engine)
     seen = set()
     for py in list(candidates) + [sys.executable]:
         if not py or py in seen:
@@ -116,7 +133,7 @@ def ensure_interpreter(engine: str, argv: list[str]) -> None:
     """当前解释器缺依赖时，把自身交给带依赖的那个 python 重跑，然后退出。"""
     if os.environ.get("OCR_REEXEC"):
         return
-    modules = RAPID_MODULES if engine == "rapid" else VL_MODULES
+    _candidates, modules = _engine_env(engine)
     if _has_modules(sys.executable, modules):
         return
     py = _pick_python(engine)
@@ -279,6 +296,107 @@ class RapidEngine:
         return "\n".join(line for line in lines if line)
 
 
+def _torch_lib_dir() -> str:
+    """gsv-venv 里 torch\\lib 带着 CUDA12 + cuDNN9 的 DLL（torch 是 cu128 版）。
+    onnxruntime-gpu 复用它们即可，不必再装一整套 CUDA 运行时。不 import torch（重），按 venv 目录推。"""
+    if os.environ.get("OCR_TORCH_LIB"):
+        return os.environ["OCR_TORCH_LIB"]
+    venv = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))  # <venv>/Scripts/python.exe
+    for sub in (("Lib", "site-packages"), ("lib", "site-packages")):
+        cand = os.path.join(venv, *sub, "torch", "lib")
+        if os.path.isdir(cand):
+            return cand
+    try:
+        import torch  # type: ignore
+        return os.path.join(os.path.dirname(torch.__file__), "lib")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _enable_cuda_inference_sessions(ort) -> dict:
+    """rapidocr 建会话时把 providers 写死成 CPU。这里包一层 InferenceSession，
+    强制 CUDAExecutionProvider 优先、CPU 兜底，并记录第一张会话是否真用上了 CUDA。"""
+    probe = {"cuda": False, "checked": False}
+    orig = ort.InferenceSession
+
+    def wrapper(*args, **kwargs):
+        passed = kwargs.get("providers")
+        if passed:
+            if isinstance(passed, str):
+                passed = [passed]
+            desired = ["CUDAExecutionProvider"] + [p for p in passed if p != "CUDAExecutionProvider"]
+        else:
+            desired = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        kwargs["providers"] = desired
+        sess = orig(*args, **kwargs)
+        if not probe["checked"]:
+            probe["checked"] = True
+            probe["cuda"] = "CUDAExecutionProvider" in sess.get_providers()
+            _log(f"[ocr] rapid-cuda：首个会话 session.get_providers()={sess.get_providers()}")
+        return sess
+
+    ort.InferenceSession = wrapper  # type: ignore[attr-defined]
+    return probe
+
+
+class RapidCudaEngine:
+    """RapidOCR 但推理走 ONNX Runtime 的 CUDAExecutionProvider。
+    跑在 gsv-venv：复用同包内 rapidocr 的默认 onnx 模型 + torch\\lib 的 cuDNN9 DLL。
+    CUDA 不可用时自动回落 CPU（stderr 说明），输出与 rapid 档逐字一致（同模型同后处理）。"""
+
+    name = "rapid-cuda"
+
+    def __init__(self) -> None:
+        try:
+            import onnxruntime as ort  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            raise OcrError(2, f"rapid-cuda 缺 onnxruntime（GPU 版）：{type(exc).__name__}: {exc}") from exc
+        # torch\lib 的 CUDA12/cuDNN9 DLL 必须在建任何会话之前挂上
+        dll_dir = _torch_lib_dir()
+        if dll_dir and hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(dll_dir)
+                os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+            except OSError:
+                pass
+        avail = ort.get_available_providers()
+        _log(f"[ocr] rapid-cuda：ort.get_available_providers()={avail}")
+        if "CUDAExecutionProvider" not in avail:
+            _log(f"[ocr] rapid-cuda：onnxruntime 无 CUDAExecutionProvider（有 {avail}），回落 CPU")
+            from rapidocr_onnxruntime import RapidOCR  # type: ignore  # noqa: E402 后文同款 import
+            self._engine = RapidOCR()
+            self.active = "cpu"
+            return
+        # 关键顺序：rapidocr 的 infer_engine 在 import 时就把 InferenceSession 绑进了自己命名空间，
+        # 所以必须先给 onnxruntime 打 CUDA 包装、再 import rapidocr——否则包装根本不生效（会话照旧 CPU）。
+        probe = _enable_cuda_inference_sessions(ort)
+        try:
+            from rapidocr_onnxruntime import RapidOCR  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            raise OcrError(2, f"rapid-cuda 缺 rapidocr_onnxruntime：{type(exc).__name__}: {exc}") from exc
+        try:
+            self._engine = RapidOCR()
+        except Exception as exc:  # noqa: BLE001
+            _log(f"[ocr] rapid-cuda：CUDA 建会话失败（{type(exc).__name__}: {exc}），回落 CPU")
+            self._engine = RapidOCR()
+            self.active = "cpu"
+            return
+        if probe["cuda"]:
+            self.active = "cuda"
+            _log("[ocr] rapid-cuda：CUDAExecutionProvider 已启用")
+        else:
+            self.active = "cpu"
+            _log("[ocr] rapid-cuda：请求了 CUDA provider 但未生效（多半缺对应 DLL），回落 CPU")
+
+    def run(self, image_path: str) -> str:
+        try:
+            result, _elapse = self._engine(image_path)
+        except Exception as exc:  # noqa: BLE001
+            raise OcrError(1, f"RapidOCR(cuda) 识别失败（{type(exc).__name__}: {exc}）") from exc
+        lines = [str(item[1]).strip() for item in (result or []) if len(item) > 1]
+        return "\n".join(line for line in lines if line)
+
+
 def _ensure_torchvision() -> None:
     """Qwen3-VL 的 AutoProcessor 需要 torchvision。
 
@@ -434,8 +552,11 @@ def main(argv: list[str]) -> int:
         prog="ocr.py",
         description="本地 OCR：扫描件 PDF / 图片转文字（rapid=RapidOCR，vl=Qwen3-VL-2B）。",
     )
-    parser.add_argument("--engine", choices=("rapid", "vl"), default="rapid")
-    parser.add_argument("--in", dest="src", required=True, metavar="PATH", help="PDF/图片文件，或装着它们的目录")
+    parser.add_argument("--engine", choices=("rapid", "rapid-cuda", "vl"), default="rapid")
+    parser.add_argument(
+        "--in", dest="src", required=True, nargs="+", metavar="PATH",
+        help="PDF/图片文件或目录；可给多个路径，同一次进程内模型只加载一次、逐份输出（旧单路径用法不变）",
+    )
     parser.add_argument("--out", dest="outdir", default="", help="把每个输入的文本写成 <名字>.txt 放到这个目录")
     parser.add_argument("--json", action="store_true", help="每行输出一个 JSON：{engine,source,pages,ms}")
     parser.add_argument("--max-pages", type=int, default=0, help="只处理前 N 页（0 = 全部）")
@@ -456,15 +577,25 @@ def main(argv: list[str]) -> int:
     if args.max_pages < 0:
         raise OcrError(6, "--max-pages 不能是负数")
 
-    sources = collect_inputs(args.src)
+    sources: list[str] = []
+    for one in args.src:
+        for p in collect_inputs(one):
+            if p not in sources:
+                sources.append(p)
+    if not sources:
+        raise OcrError(6, "--in 展开后没有任何可处理的输入")
     if args.outdir:
         os.makedirs(args.outdir, exist_ok=True)
 
-    engine = (
-        RapidEngine()
-        if args.engine == "rapid"
-        else VLEngine(args.model, args.device, args.max_new_tokens, args.vl_max_pixels)
-    )
+    t_load = time.time()
+    if args.engine == "rapid":
+        engine = RapidEngine()
+    elif args.engine == "rapid-cuda":
+        engine = RapidCudaEngine()
+    else:
+        engine = VLEngine(args.model, args.device, args.max_new_tokens, args.vl_max_pixels)
+    _log(f"[ocr] 引擎 {engine.name} 就绪：模型加载 {time.time() - t_load:.1f}s"
+         + (f"，provider={engine.active}" if getattr(engine, "active", None) else ""))
 
     used_names: set[str] = set()
     failures = 0
@@ -481,6 +612,9 @@ def main(argv: list[str]) -> int:
                      f"{len(txt)} 字")
             ms = int(round((time.time() - t0) * 1000))
             doc = {"engine": engine.name, "source": os.path.abspath(src), "pages": page_rows, "ms": ms}
+            prov = getattr(engine, "active", None)
+            if prov:
+                doc["provider"] = prov  # 仅 rapid-cuda：标注这一行实际跑在 cuda 还是回落 cpu
             if args.json:
                 print(json.dumps(doc, ensure_ascii=False), flush=True)
             if args.outdir:

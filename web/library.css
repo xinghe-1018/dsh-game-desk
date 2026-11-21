@@ -244,6 +244,9 @@ a.ghost {
 @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 @keyframes slide { from { background-position: -60% 0; } to { background-position: 160% 0; } }
 .progress-l { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; color: var(--muted); margin-top: 6px; }
+.progress-top { display: flex; align-items: center; gap: 8px; }
+.progress-top .progress-bar { flex: 1; min-width: 0; }
+.progress-pct { flex: none; font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--ink); letter-spacing: 0.02em; font-variant-numeric: tabular-nums; min-width: 3em; text-align: right; }
 
 /* ---- OCR 串行 / 并行开关 ---- */
 .ocr-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 2px 0 10px; }
@@ -326,7 +329,11 @@ a.ghost {
 @media (max-width: 860px) {
   .check { grid-template-columns: 10px 92px minmax(0, 1fr); }
   .verdict { grid-template-columns: auto minmax(0, 1fr); }
-  .verdict em { display: none; }
+  /* 「N / M 项通过」「含 K 项 AI 补全」是有信息量的：以前在窄屏被整块 display:none 掉了。
+     改成缩字号 + 允许换行，宁可小一点也要留着。 */
+  .verdict { font-size: 12.5px; flex-wrap: wrap; }
+  .verdict em { display: inline; font-size: 9px; white-space: normal; }
+  .verdict .verdict-nums { flex-wrap: wrap; row-gap: 2px; }
   .step { grid-template-columns: 12px minmax(0, 96px) minmax(0, 1fr); }
   .match-grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
   .match-side { border-left: 0; padding-left: 0; border-top: 1px solid var(--rule-soft); padding-top: 14px; }
@@ -365,6 +372,102 @@ a.ghost {
   .gap b { flex: none; }
 }
 
+
+/* ---------- 房间条（m01600）：访客一进来就能看见有没有房、哪一本、缺什么要素 ---------- */
+.roombar {
+  position: relative;
+  z-index: 2;
+  padding: 9px 26px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-2);
+  font-size: 13px;
+}
+.roombar .rb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.roombar .rb-k {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 1px 6px 0;
+}
+.roombar .rb-title { font-family: var(--serif); font-size: 15px; font-weight: 600; letter-spacing: 0.02em; }
+.roombar .rb-chips { display: inline-flex; flex-wrap: wrap; gap: 5px; }
+.roombar .rb-chip {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  color: var(--ink-2);
+  background: var(--paper);
+}
+.roombar .rb-state { color: var(--ink-2); font-size: 12.5px; }
+.roombar .rb-acts { margin-left: auto; display: inline-flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+/* 预览兜底提示：doc/xlsx 这类二进制文档浏览器认不了时给的一句话 + 打开文件夹 */
+.viewer-fallback { margin: 8px 2px 0; font-family: var(--mono); font-size: 10px; letter-spacing: 0.02em; color: var(--ink-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.roombar .rb-miss {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.roombar .rb-miss-i { border-bottom: 1px dashed var(--rule); padding-bottom: 1px; color: var(--ink-2); }
+.roombar .rb-miss-i.is-hard { color: var(--stamp); border-bottom-color: var(--stamp-soft); }
+
+/* ---------- 在场名册与昵称（只给人数与名字，不暴露谁在哪个房间的内部路径） ---------- */
+.roombar .rb-people {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.roombar .rb-people-n { color: var(--ink-2); }
+.roombar .rb-people-i { border-bottom: 1px dashed var(--rule); padding-bottom: 1px; color: var(--ink-2); }
+.roombar .rb-nick { letter-spacing: 0; }
+.roombar .rb-nickrow {
+  margin-top: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 12px;
+}
+.roombar .rb-nickrow input {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 8px;
+  min-width: 10em;
+  max-width: 16em;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+@media (max-width: 680px) {
+  .roombar { padding: 8px 14px; }
+  .roombar .rb-row { gap: 6px 8px; }
+  .roombar .rb-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .roombar .rb-chips { order: 3; flex: 1 1 100%; }
+  .roombar .rb-state { order: 4; flex: 1 1 100%; font-size: 12px; }
+  .roombar .rb-acts { order: 2; margin-left: auto; }
+}
+
+/* 昵称输入行与名册的窄屏（与上面那条 roombar 680px 分节分开写，不动既有规则） */
+@media (max-width: 680px) {
+  .roombar .rb-people { flex: 1 1 100%; order: 5; font-size: 11px; gap: 2px 6px; }
+  .roombar .rb-nickrow { margin-top: 6px; }
+  .roombar .rb-nickrow input { flex: 1 1 auto; min-width: 0; max-width: none; }
+}
+
 /* ---------- 手机端 ---------- */
 @media (max-width: 680px) {
   .sheet { padding: 10px; }
@@ -378,7 +481,10 @@ a.ghost {
   .file { grid-template-columns: 28px minmax(0, 1fr) auto; gap: 8px; padding: 10px 10px; }
   .file-name { word-break: break-all; }
   .screen { padding: 14px 14px 15px; }
-  .check { grid-template-columns: 10px 76px minmax(0, 1fr); gap: 8px; }
+  /* 76px 会把「剧本对位」这种四字标签压成两行、和后面的说明糊在一起：
+     列宽交给内容（min-content）+ 标签 nowrap，说明列继续吃剩余宽度。 */
+  .check { grid-template-columns: 10px min-content minmax(0, 1fr); gap: 8px; }
+  .check-l { white-space: nowrap; }
   .importbar { flex-wrap: wrap; }
   .importbar .primary { width: 100%; text-align: center; }
   .srcbar { flex-wrap: wrap; }
@@ -399,10 +505,210 @@ a.ghost {
 .t-block { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--rule); }
 .t-warn { margin: 8px 0 0; font-family: var(--mono); font-size: 9.5px; line-height: 1.8; color: var(--muted); }
 .t-warn.is-bad { color: var(--stamp); }
+/* 房间在场条（任务4）：人在才开、人走自动关 —— 房主弹层里的实时状态 */
+.t-room { margin: 8px 0 0; font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em; background: var(--paper-2); border: 1px solid var(--rule); border-radius: 2px; padding: 7px 10px; }
+.t-room-k { font-size: 9px; letter-spacing: 0.14em; color: var(--muted); text-transform: uppercase; margin-right: 4px; }
+.t-room button { margin-left: 6px; }
 
-/* 缺件总结（模型只列缺什么，不补充） */
-.gaps-out { margin: 4px 0 14px; }
+/* 缺件总结（模型只列缺什么，不补充）；带底色与体检行拉开层级 */
+.gaps-out { margin: 4px 0 14px; background: var(--paper-2); border: 1px solid var(--rule); border-radius: 2px; padding: 12px 14px 11px; }
 .gaps-k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
 .gaps-list { margin: 0 0 6px; padding: 0; list-style: none; border-left: 2px solid var(--stamp); padding-left: 14px; }
 .gaps-list li { font-size: 12.5px; line-height: 1.8; color: var(--ink-2); padding: 1px 0; }
 #btn-gaps, #btn-gaps-pack { margin-left: 10px; vertical-align: 1px; }
+
+/* ---------- 缺项复核 / AI 补全（用户 2026-11-19） ----------
+   这一组样式单独起块，不去改上面的 .fact / .chip / .roombar / 手机端既有规则。
+   「AI 补全」的标记必须比原稿标签更显眼：暗金 + 虚线 + 斜体，选择器带 .pack-tags 前缀，
+   特异性高于 app.js 里注入的 .pack-chip.is-full，避免被「全要素」的金色实线盖掉。 */
+.pack-tags .pack-chip.is-aifill {
+  color: var(--gold);
+  border-style: dashed;
+  opacity: 1;
+  font-style: italic;
+  letter-spacing: 0.06em;
+}
+
+/* 缺项清单（资料夹本）：条目右侧挂「AI 补全」徽标 + 撤销 */
+.gd-miss { margin: 4px 0 14px; }
+.gd-miss .gaplist-k em { font-style: normal; color: var(--gold); }
+.gd-sub { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; color: var(--muted); margin-left: 8px; }
+.gap.is-ai b { color: var(--gold); }
+.gd-tail { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.gd-ai {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-style: italic;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  padding: 1px 4px;
+  color: var(--gold);
+  border: 1px dashed var(--gold);
+  border-radius: 1px;
+  white-space: nowrap;
+}
+.gd-mini {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 1px;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+.gd-mini:hover { color: var(--stamp); border-color: var(--stamp); }
+.gd-mini:disabled { opacity: 0.45; cursor: default; }
+
+/* 复核块：沿用 .gaps-out 的纸感底，标题行 + 说明 + 按钮 + 结果 */
+.gd-review { margin-top: 0; }
+.gd-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.gd-k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2); }
+.gd-note { flex: 1; min-width: 180px; font-size: 11.5px; line-height: 1.65; color: var(--muted); }
+.gd-act, .gd-after { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gd-after { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--rule); }
+.gd-hint { flex: 1; min-width: 160px; font-family: var(--mono); font-size: 9.5px; line-height: 1.65; letter-spacing: 0.02em; color: var(--muted); }
+.gd-hint code, .gd-aiinfo code { font-family: var(--mono); font-size: 9.5px; }
+.gd-aiinfo { font-size: 11.5px; line-height: 1.7; color: var(--ink-2); margin: 0 0 8px; }
+.gd-out { margin-top: 10px; }
+.gd-rhead { font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 6px; }
+.gd-rrow { padding: 6px 0; border-top: 1px dashed var(--rule-soft); }
+.gd-rrow:first-child { border-top: 0; }
+.gd-rline { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.gd-rline b { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.gd-why { flex: 1; min-width: 140px; font-size: 11.5px; line-height: 1.65; color: var(--muted); }
+.gd-ev { display: block; margin-top: 3px; font-family: var(--mono); font-size: 10.5px; line-height: 1.75; color: var(--ink-2); opacity: 0.85; }
+.gd-line { margin: 0; font-size: 11.5px; line-height: 1.7; color: var(--muted); }
+.gd-line.is-wait { color: var(--ink-2); }
+.gd-line.is-bad { color: var(--stamp); }
+
+/* ---------- AI 试玩（用户 2026-11-20「体检完让 AI 走一遍，看看能不能玩」） ----------
+   跟缺项复核同一套纸感底（宿主给的是 .gaps-out），六门排成一行小徽标：绿=通、暗金=薄、红=断。
+   「缺项不挡流程」这条口径不在这里判断，文案只说结果；判断在宿主提示词里。 */
+.ptbox { margin-top: 0; }
+.pt-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.pt-k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2); }
+.pt-chip {
+  display: inline-block; font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.08em;
+  padding: 1px 5px; border: 1px dashed currentColor; border-radius: 1px; white-space: nowrap;
+  color: var(--muted);
+}
+.pt-chip.is-playable { color: #2f7a55; }
+.pt-chip.is-risky { color: var(--gold); }
+.pt-chip.is-unplayable { color: var(--stamp); }
+[data-theme="dark"] .pt-chip.is-playable { color: #6fbf8f; }
+.pt-meta { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.02em; color: var(--muted); }
+.pt-meta.is-stale { color: var(--gold); }
+.pt-line { margin: 0 0 8px; font-size: 11.5px; line-height: 1.7; color: var(--ink-2); }
+.pt-gates { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.pt-gate {
+  display: inline-flex; align-items: baseline; gap: 5px; padding: 2px 6px;
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.04em;
+  border: 1px solid currentColor; border-radius: 1px; color: var(--muted);
+}
+.pt-gate b { font-weight: 600; font-size: 9.5px; }
+.pt-gate i { font-style: normal; opacity: 0.8; max-width: 22em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-gate.is-ok { color: #2f7a55; }
+.pt-gate.is-thin { color: var(--gold); border-style: dashed; }
+.pt-gate.is-broken { color: var(--stamp); }
+[data-theme="dark"] .pt-gate.is-ok { color: #6fbf8f; }
+.pt-block { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 4px 0 4px 8px; border-left: 2px solid var(--stamp); margin-bottom: 4px; }
+.pt-block b { font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
+.pt-block span { flex: 1; min-width: 140px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.pt-tip { font-size: 11.5px; line-height: 1.7; color: var(--muted); }
+.pt-tip::before { content: '·'; margin-right: 6px; color: var(--gold); }
+.pt-act { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pt-hint { flex: 1; min-width: 160px; font-family: var(--mono); font-size: 9.5px; line-height: 1.65; color: var(--muted); }
+.pt-now { font-size: 11.5px; line-height: 1.7; color: var(--ink-2); }
+@media (max-width: 680px) {
+  .pt-head { gap: 8px; }
+  .pt-gate i { max-width: 12em; }
+  .pt-hint { min-width: 100%; }
+}
+
+/* 结论徽标：真缺=虚线灰 · 原文里有=绿实线 · 拿不准=灰实线 */
+.gd-vd {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+  white-space: nowrap;
+}
+.gd-vd.is-missing { color: var(--muted); border-style: dashed; }
+.gd-vd.is-present { color: #2f7a55; }
+.gd-vd.is-unclear { color: var(--muted); }
+[data-theme="dark"] .gd-vd.is-present { color: #6fbf8f; }
+
+/* 手机端只放宽新块的换行，既有 680px 规则一条不动 */
+@media (max-width: 680px) {
+  .gd-act, .gd-after { gap: 8px; }
+  .gd-act .primary, .gd-after .primary { width: 100%; text-align: center; }
+  .gd-hint { min-width: 100%; }
+  .gd-tail { flex: 0 0 auto; }
+  .gd-rline { gap: 6px; }
+}
+
+/* ---------- 体检行上的 AI 补全标记（用户 2026-11-19：补全的项目在体检处也要打上标记） ----------
+   「这一项不是原稿」跟缺项清单里的 .gd-ai / .pack-chip.is-aifill 用同一套观感：
+   暗金 + 虚线 + 斜体，不做告警红 —— 补全不是错误，只是来源不同。
+   这一组单独起块，不改上面既有的 .check / .checks / .verdict / 680px 规则。 */
+/* 判定行：整行只把左边那条竖线换成暗金，克制提示「这本里有补内容」 */
+.verdict.is-aifill { border-left-color: var(--gold); }
+/* 判定行右侧的「N / M 项通过 · 含 K 项 AI 补全」装在一个 flex 里，四列网格不会被多出来的 em 挤断 */
+.verdict .verdict-nums {
+  display: flex; align-items: baseline; justify-content: flex-end;
+  gap: 4px 8px; flex-wrap: wrap;
+}
+.verdict em.verdict-ai { color: var(--gold); font-style: normal; letter-spacing: 0.02em; }
+.verdict em.verdict-ai::before { content: '·'; margin-right: 5px; color: var(--muted); }
+/* 补过的行：纸底带一点暗金，左侧绿点外加一圈暗金描边（level 仍然是 ok，不改体检结论） */
+.check.is-ai { background: color-mix(in srgb, var(--gold) 7%, transparent); }
+.dot.is-ai { box-shadow: 0 0 0 2px color-mix(in srgb, var(--gold) 45%, transparent); }
+/* 行内徽标：跟 .gd-ai（缺项清单）同一套字号/虚线/暗金 */
+.chk-ai {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-style: italic;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  padding: 1px 4px;
+  color: var(--gold);
+  border: 1px dashed var(--gold);
+  border-radius: 1px;
+  white-space: nowrap;
+}
+
+/* ---------- 逐项补：待补那一列（用户 2026-11-19「AI 补全要逐项分开执行」） ----------
+   一行一项，每行一个「补这项」：点一次只补这一项，写完立刻打「AI 补全」标记。
+   已补行（.gap.is-ai）仍是低调的描边「撤销」；待补行的按钮做成实心暗金，一眼看出这儿能动手。 */
+.gap.is-pend { background: color-mix(in srgb, var(--gold) 4%, transparent); }
+.gap.is-pend b { color: var(--stamp); }
+.gd-mini.is-fill {
+  color: var(--paper);
+  background: var(--gold);
+  border-color: var(--gold);
+  font-style: normal;
+  letter-spacing: 0.04em;
+}
+.gd-mini.is-fill:hover { color: var(--paper); border-color: var(--stamp); background: var(--stamp); }
+.gd-mini.is-fill:disabled { opacity: 0.5; cursor: default; background: var(--gold); border-color: var(--gold); }
+/* 复核块点「到下面逐项补」时把这张表闪一下，告诉人看哪儿（只滚动/高亮，不发模型调用） */
+@keyframes gd-flash-ring {
+  0%, 100% { box-shadow: none; }
+  35% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--gold) 60%, transparent); }
+}
+.gd-aifill.is-flash { animation: gd-flash-ring 1.1s ease-out 1; }
+@media (prefers-reduced-motion: reduce) { .gd-aifill.is-flash { animation: none; } }
+
+/* 逐项补 · 复核那句提示单独一行（不是告警，只是把「别白补」说清楚） */
+.gd-sub-line { display: block; margin: -2px 0 8px; }
+.gd-sub-line .gd-sub { margin-left: 0; }
+/* 待补项全被复核认定「原文里就有」时的降级行：不用补，别用告警色 */
+.gap.is-rest b { color: var(--muted); font-weight: 500; }

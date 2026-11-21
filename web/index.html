@@ -30,6 +30,17 @@
   </div>
 </header>
 
+<div class="roombar" id="roombar" hidden role="status" aria-live="polite">
+  <div class="rb-row">
+    <span class="rb-k">房间</span>
+    <span class="rb-title" id="rb-title"></span>
+    <span class="rb-chips" id="rb-chips"></span>
+    <span class="rb-state" id="rb-state"></span>
+    <span class="rb-acts" id="rb-acts"></span>
+  </div>
+  <div class="rb-miss" id="rb-miss" hidden></div>
+</div>
+
 <main class="stage" id="stage-jubensha">
   <section class="ledger">
     <div class="lib">
@@ -45,8 +56,6 @@
       </label>
       <div class="chips" id="chips">
         <button class="chip is-on" data-filter="all" type="button">全部</button>
-        <button class="chip" data-filter="4" type="button">四人</button>
-        <button class="chip" data-filter="6" type="button">六人</button>
       </div>
     </div>
     <div class="cases" id="cases"><div class="skeleton"></div></div>
@@ -129,6 +138,7 @@
         <button class="ghost" id="t-rotatekey" type="button">换公网钥匙</button>
       </div>
       <div class="lan-urls" id="t-urls"></div>
+      <div class="t-room" id="t-room" hidden></div>
       <div class="field-row t-quota">
         <label class="field"><span>公网模型额度</span>
           <select id="r-mode"><option value="off">不烧额度（默认）</option><option value="quota">每日限额</option><option value="allow">完全放开</option></select>
@@ -201,9 +211,12 @@
 <div class="sheet" id="arcade-sheet" hidden>
   <div class="sheet-card wide" role="dialog" aria-modal="true" aria-labelledby="arcade-title">
     <h2 id="arcade-title">导入内容到游戏厅</h2>
-    <p class="sheet-l">填一个资料夹（案例集、小说、设定集都行）：先抽字，再挑一种玩法登记进内容库；之后点它的卡片就开一局「材料局」，主持人按资料现编现裁。</p>
-    <label class="field"><span>路径</span><input id="a-path" type="text" list="a-paths" placeholder="D:\资料\某本怪谈合集" /></label>
-    <datalist id="a-paths"></datalist>
+    <p class="sheet-l">资料夹导入会先抽字、再挑一种玩法登记进内容库；一碗汤面加一碗汤底这种小东西直接「手写一条」存进来，不用先建资料夹。</p>
+    <div class="arcade-tabs" role="tablist" aria-label="导入方式">
+      <button class="arcade-tab is-on" type="button" role="tab" data-atab="folder" aria-selected="true">从资料夹导入</button>
+      <button class="arcade-tab" type="button" role="tab" data-atab="hand" aria-selected="false">手写一条</button>
+    </div>
+    <p class="arcade-hint" id="a-hint" hidden></p>
     <div class="field-row">
       <label class="field"><span>玩法</span>
         <select id="a-scheme">
@@ -216,24 +229,55 @@
           <option value="trpg">单人跑团</option>
         </select>
       </label>
-      <label class="field"><span>名字（可空，默认用文件夹名）</span><input id="a-title" type="text" /></label>
       <label class="field"><span>人数（可空，按名字猜）</span><input id="a-players" type="text" placeholder="2 / 4-6 / 1人" /></label>
+    </div>
+    <div class="arcade-pane" id="a-pane-folder">
+      <label class="field"><span>路径</span><input id="a-path" type="text" list="a-paths" placeholder="D:\资料\某本怪谈合集" /></label>
+      <datalist id="a-paths"></datalist>
+      <label class="field"><span>名字（可空，默认用文件夹名）</span><input id="a-title" type="text" /></label>
+      <label class="arcade-auto"><input type="checkbox" id="a-auto" checked /> <span>自动识文字并拆成一篇一篇（图片/扫描件也行，一个子资料夹算一篇；之后在玩法卡的「更多」里可随机换一篇）</span></label>
+      <div class="import-result" id="arcade-result" hidden></div>
+    </div>
+    <div class="arcade-pane" id="a-pane-hand" hidden>
+      <label class="field"><span>标题（必填，30 字以内）</span><input id="a-hand-title" type="text" maxlength="30" placeholder="例如：午夜最后一班电梯" /></label>
+      <label class="field"><span>材料正文</span><textarea id="a-hand-body" rows="6" placeholder="海龟汤就写汤面：发生了什么、结局是什么"></textarea></label>
+      <label class="field"><span>汤底 / 真相（可空）</span><textarea id="a-hand-truth" rows="4" placeholder="可空。汤底、凶手、解法——只有主持人和 AI 看得到"></textarea></label>
     </div>
     <div class="sheet-actions">
       <button class="ghost" id="arcade-cancel" type="button">算了</button>
       <button class="primary" id="arcade-scan" type="button">扫描并抽字</button>
+      <button class="primary" id="a-hand-save" type="button" hidden>保存这条</button>
     </div>
-    <div class="import-result" id="arcade-result" hidden></div>
+  </div>
+</div>
+
+<div class="sheet" id="arc-more" hidden>
+  <div class="sheet-card wide" role="dialog" aria-modal="true" aria-labelledby="arc-more-title">
+    <h2 id="arc-more-title">内容库</h2>
+    <p class="sheet-l" id="arc-more-sum">共 0 份内容</p>
+    <div class="arc-more-list" id="arc-more-list"></div>
+    <div class="sheet-actions">
+      <button class="ghost" id="arc-more-close" type="button">收起</button>
+      <button class="ghost" id="arc-more-rand" type="button">随机开一篇</button>
+      <button class="primary" id="arc-more-imp" type="button">＋ 再加一份</button>
+    </div>
   </div>
 </div>
 
 <div class="toast" id="toast" hidden></div>
 
+<div class="imp-strip" id="imp-strip" hidden role="status" aria-live="polite">
+  <span class="imp-strip-l" id="imp-strip-text">正在导入…</span>
+  <span class="imp-strip-track"><i id="imp-strip-bar"></i></span>
+  <span class="imp-strip-pct" id="imp-strip-pct">0%</span>
+  <button class="imp-strip-x" id="imp-strip-x" type="button" title="收起（不打断后台任务，下轮活动会再亮）">×</button>
+</div>
+
 <section id="table" class="tbl" hidden aria-label="对局室"></section>
 
-<script src="table.js"></script>
-  <script src="arcade.js"></script>
-<script src="room.js"></script>
-<script src="app.js"></script>
+<script type="module" src="table.js"></script>
+  <script type="module" src="arcade.js"></script>
+<script type="module" src="room.js"></script>
+<script type="module" src="app.js"></script>
 </body>
 </html>

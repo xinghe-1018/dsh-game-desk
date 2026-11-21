@@ -1,0 +1,19 @@
+# 本地备份与临时产物
+*.bak-*
+*.bak
+*.log
+__pycache__/
+*.pyc
+ocr-work/
+
+# AOCI 本地认知层（工具产物，不属于插件源码）
+.aoci/
+aoci.txt
+aoci.meta.txt
+aoci.code.txt
+AGENTS.md
+
+# 依赖与系统杂项
+node_modules/
+.DS_Store
+Thumbs.db
